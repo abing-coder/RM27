@@ -1,6 +1,7 @@
 enemy_color: "red"
 # enemy_color: "blue"
 
+
 #####-----神经网络参数-----#####
 yolo_name: yolov5
 classify_model: assets/tiny_resnet.onnx
@@ -11,6 +12,7 @@ device: CPU
 min_confidence: 0.8
 use_traditional: true
 
+#输出分辨率为1440x1080
 #####-----ROI-----#####
 roi: 
   x: 420
@@ -51,6 +53,7 @@ first_tolerance: 5 # 近距离射击容差，degree
 second_tolerance: 4 # 远距离射击容差，degree
 judge_distance: 4 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
+use_gimbal_feedback: false # 无 IMU 时 false，仅凭指令稳定判定开火；有 IMU 时 true
 
 camera_name: "hikrobot"
 exposure_ms: 2
@@ -63,18 +66,24 @@ vid_pid: "2bdf:0001"
 R_gimbal2imubody: [-1, 0, 0, 0, -1, 0, 0, 0, 1]
 
 # 重投影误差: 0.2697px
-camera_matrix: [1818.3669452465165, 0, 751.06226574703498, 0, 1822.494494078506, 530.43671556112133, 0, 0, 1]
-distort_coeffs: [-0.077944626599568856, 0.15447826031486889, -0.0025714394278524674, 0.00083016311301273629, 0]
+camera_matrix: [2308.72631, 0, 738.39422, 0, 2308.31509, 601.2956, 0, 0, 1]
+distort_coeffs: [-0.062052, 0.014239, 0.004172, -0.000216, 0.000000]
 
 # 相机同理想情况的偏角: yaw0.46 pitch0.61 roll-1.53 degree
 R_camera2gimbal: [-0.0083195760046954614, 0.010498791137270739, 0.99991027599468041, -0.99960756138647755, -0.026835747568381807, -0.0080352891314148939, 0.026748978935305992, -0.99958472279097077, 0.010717933047771133]
 t_camera2gimbal: [0.094969301833534511, 0.095006290298006682, 0.050987066291756609]
 
+#####-----自瞄输出模式-----#####
+aim_mode: "delta"     # "delta" = 无IMU/无弹道，仅发 yaw/pitch 差值(内参+像点)；"absolute" = 预测+弹道绝对角
+# 枪口相对相机光轴的偏移（度），需自行调试后填入；开火判定以枪口对准为准（即发送的 command 为枪口差值）
+gun_yaw_offset: 0     # degree，枪口在相机 yaw 方向偏移，正=枪口在相机右侧
+gun_pitch_offset: 0  # degree，枪口在相机 pitch 方向偏移，正=枪口在相机上方
+
 #####-----cboard参数-----#####
 can_disabled: true    # 无 CAN 时 true；接上下位机后改为 false 并确保 can_interface 正确
 quaternion_canid: 0x100
 bullet_speed_canid: 0x101
-send_canid: 0xff
+send_canid: 0x520
 can_interface: "can0"
 
 #####-----gimbal参数-----#####

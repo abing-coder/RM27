@@ -9,6 +9,10 @@
 
 namespace auto_aim
 {
+/** 仅用内参从像点解算云台 yaw/pitch 增量（弧度），不依赖外参。 */
+Eigen::Vector2d pixel_to_delta_yaw_pitch(
+  const cv::Mat & camera_matrix, const cv::Mat & distort_coeffs, cv::Point2f pixel);
+
 class Solver
 {
 public:
@@ -19,6 +23,9 @@ public:
   void set_R_gimbal2world(const Eigen::Quaterniond & q);
 
   void solve(Armor & armor) const;
+
+  /** 仅内参：像点 -> (delta_yaw, delta_pitch) 弧度。 */
+  Eigen::Vector2d pixel_to_delta_yaw_pitch(cv::Point2f pixel) const;
 
   std::vector<cv::Point2f> reproject_armor(
     const Eigen::Vector3d & xyz_in_world, double yaw, ArmorType type, ArmorName name) const;

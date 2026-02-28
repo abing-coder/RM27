@@ -4,6 +4,7 @@
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include "io/camera.hpp"
 #include "io/cboard.hpp"
@@ -42,6 +43,14 @@ int main(int argc, char * argv[])
   tools::Plotter plotter;
   tools::Recorder recorder;
 
+  auto config_yaml = YAML::LoadFile(config_path);
+  std::string aim_mode =
+    config_yaml["aim_mode"] ? config_yaml["aim_mode"].as<std::string>() : "absolute";
+  double gun_yaw_offset_rad =
+    config_yaml["gun_yaw_offset"] ? config_yaml["gun_yaw_offset"].as<double>() / 57.29577951308232 : 0.0;
+  double gun_pitch_offset_rad =
+    config_yaml["gun_pitch_offset"] ? config_yaml["gun_pitch_offset"].as<double>() / 57.29577951308232 : 0.0;
+
   io::CBoard cboard(config_path);
   io::Camera camera(config_path);
 
@@ -51,6 +60,8 @@ int main(int argc, char * argv[])
   auto_aim::Tracker tracker(config_path, solver);
   auto_aim::Aimer aimer(config_path);
   auto_aim::Shooter shooter(config_path);
+
+  const bool use_delta_aim = (aim_mode == "delta");  // 无 IMU/无弹道：仅发 yaw/pitch 差值
 
   cv::Mat img;
   Eigen::Quaterniond q;
@@ -89,10 +100,36 @@ int main(int argc, char * argv[])
     size_t armors_after_color = armors.size();
 
     auto command = aimer.aim(targets, t, cboard.bullet_speed);
-    // 火控触发条件：
-    //   control=1：Aimer::aim 成功 → 有 target、瞄准点 valid、弹道可解，否则 0。
-    //   shoot=1：在 control=1 基础上，Shooter::shoot 为 true → config auto_fire: true，
-    //            且指令变化小、云台跟上（|cmd.yaw - gimbal.yaw| < tolerance），否则 0。
+    // delta 模式：发送的是预测瞄准点对应的 yaw/pitch 差值（与红框一致）
+    if (use_delta_aim) {
+      if (!targets.empty() && aimer.debug_aim_point.valid) {
+        const auto & target = targets.front();
+        const auto & aim_point = aimer.debug_aim_point;
+        auto pts = solver.reproject_armor(
+          aim_point.xyza.head(3), aim_point.xyza[3], target.armor_type, target.name);
+        if (pts.size() >= 4) {
+          cv::Point2f predicted_center(
+            (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4.f,
+            (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4.f);
+          Eigen::Vector2d delta = solver.pixel_to_delta_yaw_pitch(predicted_center);
+          command.control = true;
+          // 以枪口为准：发送给云台的是枪口应对准的差值 = 相机差值 - 枪口相对相机的偏移
+          command.yaw = delta[0] - gun_yaw_offset_rad;
+          command.pitch = delta[1] - gun_pitch_offset_rad;
+        } else {
+          command.control = false;
+          command.shoot = false;
+          command.yaw = 0;
+          command.pitch = 0;
+        }
+      } else {
+        command.control = false;
+        command.shoot = false;
+        command.yaw = 0;
+        command.pitch = 0;
+      }
+    }
+    // 火控 shoot：control=1 时由 Shooter 判定（指令稳定；有 IMU 时还要求云台跟上）
     if (command.control && !targets.empty()) {
       command.shoot = shooter.shoot(command, aimer, targets, ypr);
     }

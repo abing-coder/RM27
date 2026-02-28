@@ -2,6 +2,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <cmath>
 #include <vector>
 
 #include "tools/logger.hpp"
@@ -9,6 +10,27 @@
 
 namespace auto_aim
 {
+// ---------- 仅内参：像点 -> 云台 yaw/pitch 增量（不依赖外参） ----------
+static Eigen::Vector2d pixel_to_delta_yaw_pitch_impl(
+  const cv::Mat & camera_matrix, const cv::Mat & distort_coeffs, cv::Point2f pixel)
+{
+  std::vector<cv::Point2f> src = {pixel}, dst;
+  cv::undistortPoints(src, dst, camera_matrix, distort_coeffs, cv::noArray(), cv::noArray());
+  double nx = dst[0].x, ny = dst[0].y;
+  return Eigen::Vector2d(std::atan(nx), -std::atan(ny));
+}
+
+Eigen::Vector2d pixel_to_delta_yaw_pitch(
+  const cv::Mat & camera_matrix, const cv::Mat & distort_coeffs, cv::Point2f pixel)
+{
+  return pixel_to_delta_yaw_pitch_impl(camera_matrix, distort_coeffs, pixel);
+}
+
+Eigen::Vector2d Solver::pixel_to_delta_yaw_pitch(cv::Point2f pixel) const
+{
+  return pixel_to_delta_yaw_pitch_impl(camera_matrix_, distort_coeffs_, pixel);
+}
+
 constexpr double LIGHTBAR_LENGTH = 56e-3;     // m
 constexpr double BIG_ARMOR_WIDTH = 230e-3;    // m
 constexpr double SMALL_ARMOR_WIDTH = 135e-3;  // m

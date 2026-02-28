@@ -23,6 +23,7 @@ private:
   double first_tolerance_;
   double second_tolerance_;
   bool auto_fire_;
+  bool use_gimbal_feedback_;  // false 时无云台反馈(无IMU)，仅凭指令稳定判定开火
 };
 }  // namespace auto_aim
 
