@@ -276,6 +276,7 @@ void YOLOV8::save(const Armor & armor) const
 void YOLOV8::draw_detections(
   const cv::Mat & img, const std::list<Armor> & armors, int frame_count) const
 {
+  last_drawn_armors_ = armors;
   auto detection = img.clone();
   tools::draw_text(detection, fmt::format("[{}]", frame_count), {10, 30}, {255, 255, 255});
   for (const auto & armor : armors) {

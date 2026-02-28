@@ -23,7 +23,10 @@ public:
   std::list<Armor> postprocess(
     double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count) override;
 
+  std::list<Armor> get_last_drawn_armors() const override { return last_drawn_armors_; }
+
 private:
+  mutable std::list<Armor> last_drawn_armors_;
   std::string device_, model_path_;
   std::string save_path_, debug_path_;
   bool debug_, use_roi_, use_traditional_;

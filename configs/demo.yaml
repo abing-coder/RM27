@@ -1,5 +1,5 @@
-# enemy_color: "red"
-enemy_color: "blue"
+enemy_color: "red"
+# enemy_color: "blue"
 
 #####-----神经网络参数-----#####
 yolo_name: yolov5
@@ -47,9 +47,9 @@ high_speed_delay_time: 0.030 # s
 low_speed_delay_time: 0.015 # s
 
 #####-----shooter参数-----#####
-first_tolerance: 3 # 近距离射击容差，degree
-second_tolerance: 2 # 远距离射击容差，degree
-judge_distance: 2 #距离判断阈值
+first_tolerance: 5 # 近距离射击容差，degree
+second_tolerance: 4 # 远距离射击容差，degree
+judge_distance: 4 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 
 camera_name: "hikrobot"
@@ -71,6 +71,7 @@ R_camera2gimbal: [-0.0083195760046954614, 0.010498791137270739, 0.99991027599468
 t_camera2gimbal: [0.094969301833534511, 0.095006290298006682, 0.050987066291756609]
 
 #####-----cboard参数-----#####
+can_disabled: true    # 无 CAN 时 true；接上下位机后改为 false 并确保 can_interface 正确
 quaternion_canid: 0x100
 bullet_speed_canid: 0x101
 send_canid: 0xff

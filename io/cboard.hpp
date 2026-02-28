@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <memory>
+
 #include "io/command.hpp"
 #include "io/socketcan.hpp"
 #include "tools/logger.hpp"
@@ -56,9 +58,10 @@ private:
   };
 
   tools::ThreadSafeQueue<IMUData> queue_;  // 必须在can_之前初始化，否则存在死锁的可能
-  SocketCAN can_;
+  std::unique_ptr<SocketCAN> can_;
   IMUData data_ahead_;
   IMUData data_behind_;
+  bool can_disabled_ = false;
 
   int quaternion_canid_, bullet_speed_canid_, send_canid_;
 

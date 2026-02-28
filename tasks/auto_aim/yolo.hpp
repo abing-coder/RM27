@@ -14,6 +14,9 @@ public:
 
   virtual std::list<Armor> postprocess(
     double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count) = 0;
+
+  /** 返回本帧在 detection 窗口里画的那份 armors，用于与 detection 一致的可视化 */
+  virtual std::list<Armor> get_last_drawn_armors() const { return {}; }
 };
 
 class YOLO
@@ -25,6 +28,8 @@ public:
 
   std::list<Armor> postprocess(
     double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count);
+
+  std::list<Armor> get_last_drawn_armors() const;
 
 private:
   std::unique_ptr<YOLOBase> yolo_;

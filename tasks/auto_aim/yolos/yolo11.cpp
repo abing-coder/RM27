@@ -237,6 +237,7 @@ void YOLO11::sort_keypoints(std::vector<cv::Point2f> & keypoints)
 void YOLO11::draw_detections(
   const cv::Mat & img, const std::list<Armor> & armors, int frame_count) const
 {
+  last_drawn_armors_ = armors;
   auto detection = img.clone();
   tools::draw_text(detection, fmt::format("[{}]", frame_count), {10, 30}, {255, 255, 255});
   for (const auto & armor : armors) {

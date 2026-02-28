@@ -226,6 +226,7 @@ cv::Point2f YOLOV5::get_center_norm(const cv::Mat & bgr_img, const cv::Point2f &
 void YOLOV5::draw_detections(
   const cv::Mat & img, const std::list<Armor> & armors, int frame_count) const
 {
+  last_drawn_armors_ = armors;
   auto detection = img.clone();
   tools::draw_text(detection, fmt::format("[{}]", frame_count), {10, 30}, {255, 255, 255});
   for (const auto & armor : armors) {

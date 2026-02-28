@@ -38,9 +38,18 @@ int main(int argc, char * argv[])
   tools::Plotter plotter;
   tools::Exiter exiter;
 
-  auto video_path = fmt::format("{}.avi", input_path);
   auto text_path = fmt::format("{}.txt", input_path);
+  std::string video_path;
+  for (const auto & ext : {".avi", ".mp4", ".mov"}) {
+    video_path = fmt::format("{}{}", input_path, ext);
+    cv::VideoCapture test(video_path);
+    if (test.isOpened()) break;
+  }
   cv::VideoCapture video(video_path);
+  if (!video.isOpened()) {
+    tools::logger()->error("无法打开视频文件: {}", video_path);
+    return 1;
+  }
   std::ifstream text(text_path);
 
   auto_aim::YOLO yolo(config_path);

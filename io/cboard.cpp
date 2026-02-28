@@ -10,9 +10,19 @@ CBoard::CBoard(const std::string & config_path)
   shoot_mode(ShootMode::left_shoot),
   bullet_speed(0),
   queue_(5000),
-  can_(read_yaml(config_path), std::bind(&CBoard::callback, this, std::placeholders::_1))
-// 注意: callback的运行会早于Cboard构造函数的完成
+  can_(nullptr),
+  can_disabled_(false)
 {
+  std::string can_interface = read_yaml(config_path);
+  if (can_disabled_) {
+    auto t = std::chrono::steady_clock::now();
+    data_ahead_ = {Eigen::Quaterniond::Identity(), t};
+    data_behind_ = {Eigen::Quaterniond::Identity(), t};
+    tools::logger()->info("[Cboard] Opened (CAN disabled, using identity pose).");
+    return;
+  }
+  can_ = std::make_unique<SocketCAN>(
+    can_interface, std::bind(&CBoard::callback, this, std::placeholders::_1));
   tools::logger()->info("[Cboard] Waiting for q...");
   queue_.pop(data_ahead_);
   queue_.pop(data_behind_);
@@ -21,6 +31,8 @@ CBoard::CBoard(const std::string & config_path)
 
 Eigen::Quaterniond CBoard::imu_at(std::chrono::steady_clock::time_point timestamp)
 {
+  if (can_disabled_) return data_ahead_.q;
+
   if (data_behind_.timestamp < timestamp) data_ahead_ = data_behind_;
 
   while (true) {
@@ -44,22 +56,29 @@ Eigen::Quaterniond CBoard::imu_at(std::chrono::steady_clock::time_point timestam
   return q_c;
 }
 
+// 与达妙 can_handler 协议一致：8 字节 = yaw(int16 大端) + pitch(int16 大端) + flag(有无装甲板 int16) + shoot(火控 int16)
 void CBoard::send(Command command) const
 {
+  int16_t yaw_i = static_cast<int16_t>(command.yaw * 1e4);
+  int16_t pitch_i = static_cast<int16_t>(command.pitch * 1e4);
+  int16_t flag_i = command.control ? 1 : 0;    // 有无装甲板：有=1，无=0
+  int16_t shoot_i = command.shoot ? 1 : 0;     // 火控：开火=1，不开火=0
+
   can_frame frame;
   frame.can_id = send_canid_;
   frame.can_dlc = 8;
-  frame.data[0] = (command.control) ? 1 : 0;
-  frame.data[1] = (command.shoot) ? 1 : 0;
-  frame.data[2] = (int16_t)(command.yaw * 1e4) >> 8;
-  frame.data[3] = (int16_t)(command.yaw * 1e4);
-  frame.data[4] = (int16_t)(command.pitch * 1e4) >> 8;
-  frame.data[5] = (int16_t)(command.pitch * 1e4);
-  frame.data[6] = (int16_t)(command.horizon_distance * 1e4) >> 8;
-  frame.data[7] = (int16_t)(command.horizon_distance * 1e4);
+  frame.data[0] = (yaw_i >> 8) & 0xFF;
+  frame.data[1] = yaw_i & 0xFF;
+  frame.data[2] = (pitch_i >> 8) & 0xFF;
+  frame.data[3] = pitch_i & 0xFF;
+  frame.data[4] = (flag_i >> 8) & 0xFF;
+  frame.data[5] = flag_i & 0xFF;
+  frame.data[6] = (shoot_i >> 8) & 0xFF;
+  frame.data[7] = shoot_i & 0xFF;
 
+  if (can_disabled_) return;
   try {
-    can_.write(&frame);
+    can_->write(&frame);
   } catch (const std::exception & e) {
     tools::logger()->warn("{}", e.what());
   }
@@ -107,14 +126,16 @@ std::string CBoard::read_yaml(const std::string & config_path)
 {
   auto yaml = tools::load(config_path);
 
+  can_disabled_ = yaml["can_disabled"] ? yaml["can_disabled"].as<bool>() : false;
   quaternion_canid_ = tools::read<int>(yaml, "quaternion_canid");
   bullet_speed_canid_ = tools::read<int>(yaml, "bullet_speed_canid");
   send_canid_ = tools::read<int>(yaml, "send_canid");
 
+  if (can_disabled_) return std::string();
+
   if (!yaml["can_interface"]) {
     throw std::runtime_error("Missing 'can_interface' in YAML configuration.");
   }
-
   return yaml["can_interface"].as<std::string>();
 }
 

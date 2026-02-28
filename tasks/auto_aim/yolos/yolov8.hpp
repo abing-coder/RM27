@@ -25,7 +25,10 @@ public:
   std::list<Armor> postprocess(
     double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count) override;
 
+  std::list<Armor> get_last_drawn_armors() const override { return last_drawn_armors_; }
+
 private:
+  mutable std::list<Armor> last_drawn_armors_;
   Classifier classifier_;
   Detector detector_;
 

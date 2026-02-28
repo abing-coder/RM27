@@ -128,7 +128,13 @@ private:
     try {
       open();
     } catch (const std::exception & e) {
-      tools::logger()->warn("SocketCAN::open() failed: {}", e.what());
+      static auto last_warn = std::chrono::steady_clock::time_point{};
+      auto now = std::chrono::steady_clock::now();
+      if (last_warn == std::chrono::steady_clock::time_point{} ||
+          std::chrono::duration_cast<std::chrono::seconds>(now - last_warn).count() >= 5) {
+        tools::logger()->warn("SocketCAN::open() failed: {} (no CAN?). Retry every 5s.", e.what());
+        last_warn = now;
+      }
     }
   }
 
