@@ -5,6 +5,9 @@ project(sp_vision)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_BUILD_TYPE Release)
 message(STATUS "--------------------CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}--------------------")
+# 达妙 SDK 动态库（can_interface: damiao 时需能加载 libdm_device.so）
+list(APPEND CMAKE_BUILD_RPATH "${CMAKE_SOURCE_DIR}/io/damiao/lib/linux")
+list(APPEND CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib" "${CMAKE_SOURCE_DIR}/io/damiao/lib/linux")
 
 find_package(OpenCV REQUIRED)
 find_package(fmt REQUIRED)

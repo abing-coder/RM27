@@ -1,6 +1,8 @@
 #ifndef IO__SOCKETCAN_HPP
 #define IO__SOCKETCAN_HPP
 
+#include "io/can_backend.hpp"
+
 #include <linux/can.h>
 #include <net/if.h>
 #include <sys/epoll.h>
@@ -21,7 +23,7 @@ constexpr int MAX_EVENTS = 10;
 
 namespace io
 {
-class SocketCAN
+class SocketCAN : public ICan
 {
 public:
   SocketCAN(const std::string & interface, std::function<void(const can_frame & frame)> rx_handler)
@@ -58,7 +60,7 @@ public:
     tools::logger()->info("SocketCAN destructed.");
   }
 
-  void write(can_frame * frame) const
+  void write(can_frame * frame) const override
   {
     if (::write(socket_fd_, frame, sizeof(can_frame)) == -1)
       throw std::runtime_error("Unable to write!");

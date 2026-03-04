@@ -1,5 +1,7 @@
 #include "cboard.hpp"
 
+#include "io/damiao_can.hpp"
+#include "io/socketcan.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/yaml.hpp"
 
@@ -21,8 +23,19 @@ CBoard::CBoard(const std::string & config_path)
     tools::logger()->info("[Cboard] Opened (CAN disabled, using identity pose).");
     return;
   }
-  can_ = std::make_unique<SocketCAN>(
-    can_interface, std::bind(&CBoard::callback, this, std::placeholders::_1));
+  auto rx = std::bind(&CBoard::callback, this, std::placeholders::_1);
+  if (can_interface == "damiao") {
+    can_ = std::make_unique<DamiaoCAN>("damiao", rx);
+  } else {
+    can_ = std::make_unique<SocketCAN>(can_interface, rx);
+  }
+  if (can_send_only_) {
+    auto t = std::chrono::steady_clock::now();
+    data_ahead_ = {Eigen::Quaterniond::Identity(), t};
+    data_behind_ = {Eigen::Quaterniond::Identity(), t};
+    tools::logger()->info("[Cboard] Opened (send-only, no feedback).");
+    return;
+  }
   tools::logger()->info("[Cboard] Waiting for q...");
   queue_.pop(data_ahead_);
   queue_.pop(data_behind_);
@@ -31,7 +44,7 @@ CBoard::CBoard(const std::string & config_path)
 
 Eigen::Quaterniond CBoard::imu_at(std::chrono::steady_clock::time_point timestamp)
 {
-  if (can_disabled_) return data_ahead_.q;
+  if (can_disabled_ || can_send_only_) return data_ahead_.q;
 
   if (data_behind_.timestamp < timestamp) data_ahead_ = data_behind_;
 
@@ -127,6 +140,7 @@ std::string CBoard::read_yaml(const std::string & config_path)
   auto yaml = tools::load(config_path);
 
   can_disabled_ = yaml["can_disabled"] ? yaml["can_disabled"].as<bool>() : false;
+  can_send_only_ = yaml["can_send_only"] ? yaml["can_send_only"].as<bool>() : false;
   quaternion_canid_ = tools::read<int>(yaml, "quaternion_canid");
   bullet_speed_canid_ = tools::read<int>(yaml, "bullet_speed_canid");
   send_canid_ = tools::read<int>(yaml, "send_canid");
