@@ -72,10 +72,11 @@ Eigen::Quaterniond CBoard::imu_at(std::chrono::steady_clock::time_point timestam
 // 与达妙 can_handler 协议一致：8 字节 = yaw(int16 大端) + pitch(int16 大端) + flag(有无装甲板 int16) + shoot(火控 int16)
 void CBoard::send(Command command) const
 {
-  int16_t yaw_i = static_cast<int16_t>(command.yaw * 1e4);
-  int16_t pitch_i = static_cast<int16_t>(command.pitch * 1e4);
+  int16_t yaw_i = static_cast<int16_t>(command.yaw);
+  int16_t pitch_i = static_cast<int16_t>(command.pitch);
   int16_t flag_i = command.control ? 1 : 0;    // 有无装甲板：有=1，无=0
   int16_t shoot_i = command.shoot ? 1 : 0;     // 火控：开火=1，不开火=0
+  std::cout << "yaw_i: " << yaw_i << "   " << "pitch_i: " << pitch_i << std::endl;
 
   can_frame frame;
   frame.can_id = send_canid_;

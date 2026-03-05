@@ -113,9 +113,10 @@ int main(int argc, char * argv[])
             (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4.f);
           Eigen::Vector2d delta = solver.pixel_to_delta_yaw_pitch(predicted_center);
           command.control = true;
-          // 以枪口为准：发送给云台的是枪口应对准的差值 = 相机差值 - 枪口相对相机的偏移
-          command.yaw = delta[0] - gun_yaw_offset_rad;
-          command.pitch = delta[1] - gun_pitch_offset_rad;
+          // 发送角度（度）：差值(弧度)转度，再减枪口偏移(已是度)；下位机收 int16/1e4 得角度(度)
+          const double rad2deg = 180.0 / 3.141592653589793;
+          command.yaw = (delta[0] - gun_yaw_offset_rad) * rad2deg *10;
+          command.pitch = (delta[1] - gun_pitch_offset_rad) * rad2deg * 10;
         } else {
           command.control = false;
           command.shoot = false;
@@ -238,6 +239,8 @@ int main(int argc, char * argv[])
           tools::draw_points(vis, image_points, {0, 0, 255});
         }
       }
+      cv::namedWindow("auto_aim", cv::WINDOW_NORMAL);
+      cv::resizeWindow("auto_aim", 800, 600);
       cv::imshow("auto_aim", vis);
       if (cv::waitKey(1) == 'q') break;
     }
