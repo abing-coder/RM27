@@ -63,8 +63,11 @@ private:
   IMUData data_behind_;
   bool can_disabled_ = false;
   bool can_send_only_ = false;  // 仅发送、不等待电控反馈（单向通信）
+  double can_send_hz_ = 0.0;    // CAN 发送频率（Hz），0 表示按调用频率发送
 
   int quaternion_canid_, bullet_speed_canid_, send_canid_;
+  mutable std::chrono::steady_clock::time_point last_send_time_{};
+  mutable bool last_send_inited_ = false;
 
   void callback(const can_frame & frame);
 

@@ -72,6 +72,20 @@ Eigen::Quaterniond CBoard::imu_at(std::chrono::steady_clock::time_point timestam
 // 与达妙 can_handler 协议一致：8 字节 = yaw(int16 大端) + pitch(int16 大端) + flag(有无装甲板 int16) + shoot(火控 int16)
 void CBoard::send(Command command) const
 {
+  // 若配置了 can_send_hz_ > 0，则按该频率限流发送
+  if (can_send_hz_ > 0.0) {
+    auto now = std::chrono::steady_clock::now();
+    auto period = std::chrono::duration<double>(1.0 / can_send_hz_);
+    if (last_send_inited_) {
+      auto dt = now - last_send_time_;
+      if (dt < period) {
+        return;  // 距离上次发送间隔未到，丢弃本次指令
+      }
+    }
+    last_send_time_ = now;
+    last_send_inited_ = true;
+  }
+
   int16_t yaw_i = static_cast<int16_t>(command.yaw);
   int16_t pitch_i = static_cast<int16_t>(command.pitch);
   int16_t flag_i = command.control ? 1 : 0;    // 有无装甲板：有=1，无=0
@@ -142,6 +156,8 @@ std::string CBoard::read_yaml(const std::string & config_path)
 
   can_disabled_ = yaml["can_disabled"] ? yaml["can_disabled"].as<bool>() : false;
   can_send_only_ = yaml["can_send_only"] ? yaml["can_send_only"].as<bool>() : false;
+  // can_send_hz: 0 或缺失=按调用频率发送；>0 时按该值限流发送
+  can_send_hz_ = yaml["can_send_hz"] ? yaml["can_send_hz"].as<double>() : 0.0;
   quaternion_canid_ = tools::read<int>(yaml, "quaternion_canid");
   bullet_speed_canid_ = tools::read<int>(yaml, "bullet_speed_canid");
   send_canid_ = tools::read<int>(yaml, "send_canid");

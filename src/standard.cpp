@@ -131,10 +131,10 @@ int main(int argc, char * argv[])
       }
     }
     // 火控 shoot：control=1 时由 Shooter 判定（指令稳定；有 IMU 时还要求云台跟上）
-    if (command.control && !targets.empty()) {
-      command.shoot = shooter.shoot(command, aimer, targets, ypr);
-    }
-
+    // if (command.control && !targets.empty()) {
+    //   command.shoot = shooter.shoot(command, aimer, targets, ypr);
+    // }
+    command.shoot = 1;
     cboard.send(command);
 
     if (show_display) {
