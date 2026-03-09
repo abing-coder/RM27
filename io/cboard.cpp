@@ -1,3 +1,5 @@
+
+
 #include "cboard.hpp"
 
 #include "io/damiao_can.hpp"
@@ -24,8 +26,8 @@ CBoard::CBoard(const std::string & config_path)
     return;
   }
   auto rx = std::bind(&CBoard::callback, this, std::placeholders::_1);
-  if (can_interface == "damiao") {
-    can_ = std::make_unique<DamiaoCAN>("damiao", rx);
+  if (can_interface.rfind("damiao", 0) == 0) {
+    can_ = std::make_unique<DamiaoCAN>(can_interface, rx);
   } else {
     can_ = std::make_unique<SocketCAN>(can_interface, rx);
   }

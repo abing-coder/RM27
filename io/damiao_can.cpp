@@ -1,7 +1,11 @@
 #include "io/damiao_can.hpp"
 
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+
+#include <algorithm>
+#include <cctype>
 
 #include "tools/logger.hpp"
 
@@ -10,7 +14,38 @@ namespace io
 // SDK 回调无 user_data，单例转发（CBoard 仅一个 CAN 实例）
 static DamiaoCAN * s_rec_instance = nullptr;
 
-DamiaoCAN::DamiaoCAN(const std::string &, std::function<void(const can_frame &)> rx_handler)
+namespace
+{
+std::string trim_copy(const std::string & s)
+{
+  auto begin = std::find_if_not(s.begin(), s.end(), [](unsigned char ch) {return std::isspace(ch);});
+  auto end = std::find_if_not(s.rbegin(), s.rend(), [](unsigned char ch) {return std::isspace(ch);}).base();
+  if (begin >= end) return std::string();
+  return std::string(begin, end);
+}
+
+int parse_human_device_ordinal(const std::string & raw, const char * source)
+{
+  const auto text = trim_copy(raw);
+  if (text.empty()) {
+    throw std::runtime_error(std::string("DamiaoCAN: empty ") + source);
+  }
+
+  int ordinal = 0;
+  try {
+    ordinal = std::stoi(text);
+  } catch (...) {
+    throw std::runtime_error(std::string("DamiaoCAN: invalid ") + source + ", expected positive integer");
+  }
+
+  if (ordinal <= 0) {
+    throw std::runtime_error(std::string("DamiaoCAN: invalid ") + source + ", expected >= 1");
+  }
+  return ordinal;
+}
+}  // namespace
+
+DamiaoCAN::DamiaoCAN(const std::string & selector, std::function<void(const can_frame &)> rx_handler)
 : rx_handler_(std::move(rx_handler))
 {
   handle_ = damiao_handle_create(DEV_USB2CANFD);
@@ -37,7 +72,28 @@ DamiaoCAN::DamiaoCAN(const std::string &, std::function<void(const can_frame &)>
     throw std::runtime_error("DamiaoCAN: damiao_handle_get_devices failed");
   }
 
-  dev_ = dev_list[0];
+  int device_ordinal = 1;  // 1-based: 第1个设备
+  if (!selector.empty()) {
+    const std::string prefix = "damiao:";
+    if (selector.rfind(prefix, 0) == 0) {
+      device_ordinal = parse_human_device_ordinal(selector.substr(prefix.size()), "selector") ;
+    }
+  }
+
+  if (const char * env = std::getenv("DM_CAN_DEVICE_INDEX")) {
+    device_ordinal = parse_human_device_ordinal(env, "DM_CAN_DEVICE_INDEX");
+  }
+
+  const int device_index = device_ordinal - 1;
+  if (device_index < 0 || device_index >= handle_cnt || !dev_list[device_index]) {
+    damiao_handle_destroy(static_cast<damiao_handle *>(handle_));
+    handle_ = nullptr;
+    throw std::runtime_error(
+            "DamiaoCAN: device index out of range (requested ordinal=" +
+            std::to_string(device_ordinal) + ", detected=" + std::to_string(handle_cnt) + ")");
+  }
+
+  dev_ = dev_list[device_index];
 
   if (!device_open(static_cast<device_handle *>(dev_))) {
     damiao_handle_destroy(static_cast<damiao_handle *>(handle_));
@@ -58,7 +114,11 @@ DamiaoCAN::DamiaoCAN(const std::string &, std::function<void(const can_frame &)>
   device_hook_to_rec(static_cast<device_handle *>(dev_), rec_callback_static);
 
   opened_ = true;
-  tools::logger()->info("DamiaoCAN opened (DM-USB2FDCAN SDK).");
+  tools::logger()->info(
+    "DamiaoCAN opened (DM-USB2FDCAN SDK), device_ordinal={}, device_index_zero_based={}, total_devices={}",
+    device_ordinal,
+    device_index,
+    handle_cnt);
 }
 
 DamiaoCAN::~DamiaoCAN()

@@ -100,7 +100,7 @@ int main(int argc, char * argv[])
     size_t armors_after_color = armors.size();
 
     auto command = aimer.aim(targets, t, cboard.bullet_speed);
-    // delta 模式：发送的是预测瞄准点对应的 yaw/pitch 差值（与红框一致）
+    // delta 模式：发送的是 yaw/pitch 差值
     if (use_delta_aim) {
       if (!targets.empty() && aimer.debug_aim_point.valid) {
         const auto & target = targets.front();
@@ -111,12 +111,22 @@ int main(int argc, char * argv[])
           cv::Point2f predicted_center(
             (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4.f,
             (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4.f);
-          Eigen::Vector2d delta = solver.pixel_to_delta_yaw_pitch(predicted_center);
+          // yaw 差值：使用预测瞄准点
+          Eigen::Vector2d delta_pred = solver.pixel_to_delta_yaw_pitch(predicted_center);
+
+          // pitch 差值：优先使用当前帧实际检测到的装甲板中心
+          double pitch_delta = delta_pred[1];
+          if (!armors.empty()) {
+            const auto & det_armor = armors.front();
+            Eigen::Vector2d delta_det = solver.pixel_to_delta_yaw_pitch(det_armor.center);
+            pitch_delta = delta_det[1];
+          }
+
           command.control = true;
           // 发送角度（度）：差值(弧度)转度，再减枪口偏移(已是度)；下位机收 int16/1e4 得角度(度)
           const double rad2deg = 180.0 / 3.141592653589793;
-          command.yaw = (delta[0] - gun_yaw_offset_rad) * rad2deg *10;
-          command.pitch = (delta[1] - gun_pitch_offset_rad) * rad2deg * 10;
+          command.yaw = (delta_pred[0] - gun_yaw_offset_rad) * rad2deg * 10;
+          command.pitch = (pitch_delta - gun_pitch_offset_rad) * rad2deg * 10;
         } else {
           command.control = false;
           command.shoot = false;

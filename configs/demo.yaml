@@ -76,8 +76,8 @@ t_camera2gimbal: [0.094969301833534511, 0.095006290298006682, 0.0509870662917566
 #####-----自瞄输出模式-----#####
 aim_mode: "delta"     # "delta" = 无IMU/无弹道，仅发 yaw/pitch 差值(内参+像点)；"absolute" = 预测+弹道绝对角
 # 枪口相对相机光轴的偏移（度），需自行调试后填入；开火判定以枪口对准为准（即发送的 command 为枪口差值）
-gun_yaw_offset: 0     # degree，枪口在相机 yaw 方向偏移，正=枪口在相机右侧
-gun_pitch_offset: 0  # degree，枪口在相机 pitch 方向偏移，正=枪口在相机上方
+gun_yaw_offset: 3.5      # degree，枪口在相机 yaw 方向偏移，正=枪口在相机右侧
+gun_pitch_offset: 2.2  # degree，枪口在相机 pitch 方向偏移，正=枪口在相机上方
 
 #####-----cboard参数-----#####
 can_disabled: false    # 无 CAN 时 true；接上达妙后改为 false
@@ -87,7 +87,7 @@ quaternion_canid: 0x100
 bullet_speed_canid: 0x101
 send_canid: 0x105
 # "damiao" = 达妙 SDK 直连 DM-USB2FDCAN，无需 slcand；否则填 SocketCAN 接口名如 can0/slcan0
-can_interface: "damiao"
+can_interface: "damiao:2"
 
 #####-----gimbal参数-----#####
 com_port: "/dev/gimbal"
