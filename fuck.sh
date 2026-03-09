@@ -3,9 +3,8 @@ set -eo pipefail
 
 cd "$(dirname "$0")"
 
-if [[ -f /opt/intel/openvino_2026/setupvars.sh ]]; then
-	(set +u; source /opt/intel/openvino_2026/setupvars.sh)
-fi
+source /opt/intel/openvino_2026/setupvars.sh
+
 
 export DM_CAN_DEVICE_INDEX="${DM_CAN_DEVICE_INDEX:-2}"
 

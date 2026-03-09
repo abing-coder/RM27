@@ -46,10 +46,11 @@ int main(int argc, char * argv[])
   auto config_yaml = YAML::LoadFile(config_path);
   std::string aim_mode =
     config_yaml["aim_mode"] ? config_yaml["aim_mode"].as<std::string>() : "absolute";
-  double gun_yaw_offset_rad =
-    config_yaml["gun_yaw_offset"] ? config_yaml["gun_yaw_offset"].as<double>() / 57.29577951308232 : 0.0;
-  double gun_pitch_offset_rad =
-    config_yaml["gun_pitch_offset"] ? config_yaml["gun_pitch_offset"].as<double>() / 57.29577951308232 : 0.0;
+  // 枪口偏移：以“度”为单位读入
+  double gun_yaw_offset_deg =
+    config_yaml["gun_yaw_offset"] ? config_yaml["gun_yaw_offset"].as<double>() : 0.0;
+  double gun_pitch_offset_deg =
+    config_yaml["gun_pitch_offset"] ? config_yaml["gun_pitch_offset"].as<double>() : 0.0;
 
   io::CBoard cboard(config_path);
   io::Camera camera(config_path);
@@ -100,33 +101,56 @@ int main(int argc, char * argv[])
     size_t armors_after_color = armors.size();
 
     auto command = aimer.aim(targets, t, cboard.bullet_speed);
-    // delta 模式：发送的是 yaw/pitch 差值
+    // 统一约定：io::Command 中 yaw/pitch 以“度”为单位
+    // delta 模式：yaw 使用预测瞄准点的差值，pitch 使用当前检测装甲板的差值
     if (use_delta_aim) {
       if (!targets.empty() && aimer.debug_aim_point.valid) {
         const auto & target = targets.front();
         const auto & aim_point = aimer.debug_aim_point;
         auto pts = solver.reproject_armor(
           aim_point.xyza.head(3), aim_point.xyza[3], target.armor_type, target.name);
+
+        bool has_predicted_yaw = false;
+        bool has_detect_pitch = false;
+        double delta_yaw_pred = 0.0;
+        double delta_pitch_det = 0.0;
+
+        // 1) yaw：使用预测瞄准点（红框）的像素中心
         if (pts.size() >= 4) {
           cv::Point2f predicted_center(
             (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4.f,
             (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4.f);
-          // yaw 差值：使用预测瞄准点
           Eigen::Vector2d delta_pred = solver.pixel_to_delta_yaw_pitch(predicted_center);
+          delta_yaw_pred = delta_pred[0];
+          has_predicted_yaw = true;
+        }
 
-          // pitch 差值：优先使用当前帧实际检测到的装甲板中心
-          double pitch_delta = delta_pred[1];
-          if (!armors.empty()) {
-            const auto & det_armor = armors.front();
-            Eigen::Vector2d delta_det = solver.pixel_to_delta_yaw_pitch(det_armor.center);
-            pitch_delta = delta_det[1];
+        // 2) pitch：使用当前检测装甲板（绿框）的像素中心
+        if (!armors.empty()) {
+          const auto & det_armor = armors.front();
+          cv::Point2f det_center;
+          if (det_armor.points.size() >= 4) {
+            det_center = cv::Point2f(
+              (det_armor.points[0].x + det_armor.points[1].x + det_armor.points[2].x +
+               det_armor.points[3].x) /
+                4.f,
+              (det_armor.points[0].y + det_armor.points[1].y + det_armor.points[2].y +
+               det_armor.points[3].y) /
+                4.f);
+          } else {
+            det_center = det_armor.center;
           }
+          Eigen::Vector2d delta_det = solver.pixel_to_delta_yaw_pitch(det_center);
+          delta_pitch_det = delta_det[1];
+          has_detect_pitch = true;
+        }
 
+        if (has_predicted_yaw && has_detect_pitch) {
           command.control = true;
-          // 发送角度（度）：差值(弧度)转度，再减枪口偏移(已是度)；下位机收 int16/1e4 得角度(度)
+          // 发送角度（度）：差值(弧度)转度，再减枪口偏移(已是度)；下位机接收的就是“度”
           const double rad2deg = 180.0 / 3.141592653589793;
-          command.yaw = (delta_pred[0] - gun_yaw_offset_rad) * rad2deg * 10;
-          command.pitch = (pitch_delta - gun_pitch_offset_rad) * rad2deg * 10;
+          command.yaw = (delta_yaw_pred * rad2deg) - gun_yaw_offset_deg;
+          command.pitch = (delta_pitch_det * rad2deg) - gun_pitch_offset_deg;
         } else {
           command.control = false;
           command.shoot = false;
@@ -139,12 +163,18 @@ int main(int argc, char * argv[])
         command.yaw = 0;
         command.pitch = 0;
       }
+    } else {
+      // 绝对模式：Aimer 输出为弧度，这里统一转为“度”再发送/用于火控
+      const double rad2deg = 180.0 / 3.141592653589793;
+      command.yaw = command.yaw * rad2deg - gun_yaw_offset_deg;
+      command.pitch = command.pitch * rad2deg - gun_pitch_offset_deg;
     }
-    // 火控 shoot：control=1 时由 Shooter 判定（指令稳定；有 IMU 时还要求云台跟上）
-    // if (command.control && !targets.empty()) {
-    //   command.shoot = shooter.shoot(command, aimer, targets, ypr);
-    // }
-    command.shoot = 1;
+    // 火控 shoot：control=1 且存在目标时，由 Shooter 判定是否开火
+    if (command.control && !targets.empty()) {
+      command.shoot = shooter.shoot(command, aimer, targets, ypr);
+    } else {
+      command.shoot = false;
+    }
     cboard.send(command);
 
     if (show_display) {
@@ -206,7 +236,10 @@ int main(int argc, char * argv[])
       y0 += line_h;
       tools::draw_text(vis, fmt::format("  control:{} shoot:{}", command.control ? 1 : 0, command.shoot ? 1 : 0), {10, y0}, {255, 255, 255}, 0.6);
       y0 += line_h;
-      tools::draw_text(vis, fmt::format("  cmd yaw:{:.2f} pitch:{:.2f}", command.yaw * 57.3, command.pitch * 57.3), {10, y0}, targets.empty() ? cv::Scalar(150, 150, 150) : cv::Scalar(255, 255, 255), 0.6);
+      tools::draw_text(
+        vis, fmt::format("  cmd yaw:{:.2f}  pitch:{:.2f}", command.yaw, command.pitch),
+        {10, y0},
+        targets.empty() ? cv::Scalar(150, 150, 150) : cv::Scalar(255, 255, 255), 0.6);
       if (targets.empty() && armors_raw > 0) {
         tools::draw_text(vis, "  (no target -> fire control idle)", {10, y0 + line_h}, {0, 200, 255}, 0.55);
         y0 += line_h;
