@@ -149,8 +149,8 @@ int main(int argc, char * argv[])
           command.control = true;
           // 发送角度（度）：差值(弧度)转度，再减枪口偏移(已是度)；下位机接收的就是“度”
           const double rad2deg = 180.0 / 3.141592653589793;
-          command.yaw = (delta_yaw_pred * rad2deg) - gun_yaw_offset_deg;
-          command.pitch = (delta_pitch_det * rad2deg) - gun_pitch_offset_deg;
+          command.yaw = ((delta_yaw_pred * rad2deg) - gun_yaw_offset_deg);
+          command.pitch = ((delta_pitch_det * rad2deg) - gun_pitch_offset_deg);
         } else {
           command.control = false;
           command.shoot = false;
