@@ -101,6 +101,7 @@ int main(int argc, char * argv[])
     size_t armors_after_color = armors.size();
 
     auto command = aimer.aim(targets, t, cboard.bullet_speed);
+    io::Command fire_cmd = command;  // 专门给 Shooter 用的指令（可单独修改 yaw 基准）
     // 统一约定：io::Command 中 yaw/pitch 以“度”为单位
     // delta 模式：yaw 使用预测瞄准点的差值，pitch 使用当前检测装甲板的差值
     if (use_delta_aim) {
@@ -112,8 +113,10 @@ int main(int argc, char * argv[])
 
         bool has_predicted_yaw = false;
         bool has_detect_pitch = false;
+        bool has_detect_yaw = false;
         double delta_yaw_pred = 0.0;
         double delta_pitch_det = 0.0;
+        double delta_yaw_det = 0.0;
 
         // 1) yaw：使用预测瞄准点（红框）的像素中心
         if (pts.size() >= 4) {
@@ -141,8 +144,13 @@ int main(int argc, char * argv[])
             det_center = det_armor.center;
           }
           Eigen::Vector2d delta_det = solver.pixel_to_delta_yaw_pitch(det_center);
+          // 检测框：同时提供 yaw / pitch，用于：
+          // - pitch：通信发送
+          // - yaw：火控判断（fire_cmd）
+          delta_yaw_det = delta_det[0];
           delta_pitch_det = delta_det[1];
           has_detect_pitch = true;
+          has_detect_yaw = true;
         }
 
         if (has_predicted_yaw && has_detect_pitch) {
@@ -151,6 +159,13 @@ int main(int argc, char * argv[])
           const double rad2deg = 180.0 / 3.141592653589793;
           command.yaw = ((delta_yaw_pred * rad2deg) - gun_yaw_offset_deg);
           command.pitch = ((delta_pitch_det * rad2deg) - gun_pitch_offset_deg);
+          // 火控判断：yaw 也以检测框为基准
+          if (has_detect_yaw) {
+            fire_cmd.yaw = ((delta_yaw_det * rad2deg) - gun_yaw_offset_deg);
+          } else {
+            fire_cmd.yaw = command.yaw;
+          }
+          fire_cmd.pitch = command.pitch;
         } else {
           command.control = false;
           command.shoot = false;
@@ -168,10 +183,11 @@ int main(int argc, char * argv[])
       const double rad2deg = 180.0 / 3.141592653589793;
       command.yaw = command.yaw * rad2deg - gun_yaw_offset_deg;
       command.pitch = command.pitch * rad2deg - gun_pitch_offset_deg;
+      fire_cmd = command;
     }
     // 火控 shoot：control=1 且存在目标时，由 Shooter 判定是否开火
     if (command.control && !targets.empty()) {
-      command.shoot = shooter.shoot(command, aimer, targets, ypr);
+      command.shoot = shooter.shoot(fire_cmd, aimer, targets, ypr);
     } else {
       command.shoot = false;
     }
