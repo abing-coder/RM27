@@ -44,10 +44,12 @@ leaving_angle: 20 # degree
 decision_speed: 7 # rad/s
 high_speed_delay_time: 0.0 # s
 low_speed_delay_time: 0.0 # s planner use this value
+small_gyro_speed_thresh: 2.0 # rad/s，小陀螺判定阈值
 
 #####-----shooter参数-----#####
 first_tolerance: 3 # 近距离射击容差，degree
 second_tolerance: 2 # 远距离射击容差，degree
+small_gyro_fire_yaw_thresh: 1.0 # degree，小陀螺预测装甲板过枪线开火阈值
 judge_distance: 2 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 

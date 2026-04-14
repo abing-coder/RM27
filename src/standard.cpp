@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <yaml-cpp/yaml.h>
@@ -62,7 +63,7 @@ int main(int argc, char * argv[])
   auto_aim::Aimer aimer(config_path);
   auto_aim::Shooter shooter(config_path);
 
-  const bool use_delta_aim = (aim_mode == "delta");  // 无 IMU/无弹道：仅发 yaw/pitch 差值
+  const bool use_delta_aim = (aim_mode == "delta");  // 无 IMU：yaw 发差值，pitch 可复用弹道
 
   cv::Mat img;
   Eigen::Quaterniond q;
@@ -103,20 +104,30 @@ int main(int argc, char * argv[])
     auto command = aimer.aim(targets, t, cboard.bullet_speed);
     io::Command fire_cmd = command;  // 专门给 Shooter 用的指令（可单独修改 yaw 基准）
     // 统一约定：io::Command 中 yaw/pitch 以“度”为单位
-    // delta 模式：yaw 使用预测瞄准点的差值，pitch 使用当前检测装甲板的差值
+    // delta 模式：yaw 使用预测瞄准点的差值，pitch 使用 detector 裸测量点的弹道预测结果
     if (use_delta_aim) {
-      if (!targets.empty() && aimer.debug_aim_point.valid) {
+      if (command.control && !targets.empty() && aimer.debug_aim_point.valid) {
         const auto & target = targets.front();
         const auto & aim_point = aimer.debug_aim_point;
         auto pts = solver.reproject_armor(
           aim_point.xyza.head(3), aim_point.xyza[3], target.armor_type, target.name);
 
         bool has_predicted_yaw = false;
-        bool has_detect_pitch = false;
         bool has_detect_yaw = false;
         double delta_yaw_pred = 0.0;
-        double delta_pitch_det = 0.0;
         double delta_yaw_det = 0.0;
+        std::optional<double> measured_pitch;
+        std::optional<auto_aim::Armor> measured_armor;
+
+        auto matched_armor = std::find_if(
+          armors.begin(), armors.end(), [&](const auto_aim::Armor & armor) {
+            return armor.name == target.name && armor.type == target.armor_type;
+          });
+        if (matched_armor != armors.end()) {
+          measured_armor = *matched_armor;
+        } else if (!armors.empty()) {
+          measured_armor = armors.front();
+        }
 
         // 1) yaw：使用预测瞄准点（红框）的像素中心
         if (pts.size() >= 4) {
@@ -128,9 +139,9 @@ int main(int argc, char * argv[])
           has_predicted_yaw = true;
         }
 
-        // 2) pitch：使用当前检测装甲板（绿框）的像素中心
-        if (!armors.empty()) {
-          const auto & det_armor = armors.front();
+        // 2) detector 裸测量点：用于无 IMU 的火控判定和弹道 pitch
+        if (measured_armor.has_value()) {
+          auto det_armor = measured_armor.value();
           cv::Point2f det_center;
           if (det_armor.points.size() >= 4) {
             det_center = cv::Point2f(
@@ -144,21 +155,20 @@ int main(int argc, char * argv[])
             det_center = det_armor.center;
           }
           Eigen::Vector2d delta_det = solver.pixel_to_delta_yaw_pitch(det_center);
-          // 检测框：同时提供 yaw / pitch，用于：
-          // - pitch：通信发送
-          // - yaw：火控判断（fire_cmd）
+          // yaw 用于 fire_cmd；pitch 用 detector 裸测量点做一次弹道解算
           delta_yaw_det = delta_det[0];
-          delta_pitch_det = delta_det[1];
-          has_detect_pitch = true;
           has_detect_yaw = true;
+          solver.solve(det_armor);
+          measured_pitch = aimer.solve_ballistic_pitch(det_armor.xyz_in_world, cboard.bullet_speed);
         }
 
-        if (has_predicted_yaw && has_detect_pitch) {
+        // 无 IMU 的 delta 模式下，仍要求当前帧存在检测结果，避免纯 tracker 预测导致 yaw 抽动
+        if (has_predicted_yaw && has_detect_yaw && measured_pitch.has_value()) {
           command.control = true;
           // 发送角度（度）：差值(弧度)转度，再减枪口偏移(已是度)；下位机接收的就是“度”
           const double rad2deg = 180.0 / 3.141592653589793;
           command.yaw = ((delta_yaw_pred * rad2deg) - gun_yaw_offset_deg);
-          command.pitch = ((delta_pitch_det * rad2deg) - gun_pitch_offset_deg);
+          command.pitch = (measured_pitch.value() * rad2deg) - gun_pitch_offset_deg;
           // 火控判断：yaw 也以检测框为基准
           if (has_detect_yaw) {
             fire_cmd.yaw = ((delta_yaw_det * rad2deg) - gun_yaw_offset_deg);
@@ -189,6 +199,7 @@ int main(int argc, char * argv[])
     if (command.control && !targets.empty()) {
       command.shoot = shooter.shoot(fire_cmd, aimer, targets, ypr);
     } else {
+      shooter.reset_debug_state();
       command.shoot = false;
     }
     cboard.send(command);
@@ -225,7 +236,16 @@ int main(int argc, char * argv[])
         tools::draw_text(vis, fmt::format("  >> config enemy_color to \"{}\" (now filtered to 0)", det_color), {10, y0}, {0, 200, 255}, 0.55);
         y0 += line_h;
       }
-      // ----- 整车估计器 (EKF) -----
+      // ----- 整车估计器 11维 (EKF) -----
+      /*
+      旋转中心位置：x y z
+      旋转中心速度：vx vy vz
+      车体角度：a
+      角速度：w
+      主半径：r
+      长短轴差：l
+      高低差：h
+      */
       tools::draw_text(vis, "Estimator:", {10, y0}, {0, 255, 255}, 0.7);
       y0 += line_h;
       if (!targets.empty()) {
@@ -237,6 +257,33 @@ int main(int argc, char * argv[])
           tools::draw_text(vis, fmt::format("  xyz: ({:.2f},{:.2f},{:.2f})", x[0], x[2], x[4]), {10, y0}, {200, 200, 255}, 0.6);
           y0 += line_h;
           tools::draw_text(vis, fmt::format("  vxy: ({:.2f},{:.2f}) w:{:.2f}", x[1], x[3], x[7]), {10, y0}, {200, 200, 255}, 0.6);
+          y0 += line_h;
+          std::string gyro_text = aimer.debug_small_gyro_detected ? "YES" : "NO";
+          std::string anti_top_text = aimer.debug_small_gyro_active ? "ON" : "OFF";
+          tools::draw_text(
+            vis,
+            fmt::format(
+              "  gyro: {}  anti-top: {}  id: {}", gyro_text, anti_top_text,
+              aimer.debug_small_gyro_armor_id),
+            {10, y0},
+            aimer.debug_small_gyro_detected ? cv::Scalar(0, 200, 255) : cv::Scalar(200, 200, 255),
+            0.6);
+          y0 += line_h;
+          std::string fire_window_text =
+            shooter.debug_small_gyro_fire_window ? "OPEN" : "CLOSE";
+          if (shooter.debug_small_gyro_yaw_error_deg.has_value()) {
+            tools::draw_text(
+              vis,
+              fmt::format(
+                "  yaw_err: {:.2f} deg  fire_win: {}", shooter.debug_small_gyro_yaw_error_deg.value(),
+                fire_window_text),
+              {10, y0},
+              shooter.debug_small_gyro_fire_window ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 165, 255),
+              0.6);
+          } else {
+            tools::draw_text(
+              vis, "  yaw_err: --  fire_win: --", {10, y0}, {160, 160, 160}, 0.6);
+          }
           y0 += line_h;
           tools::draw_text(vis, fmt::format("  r:{:.2f} a:{:.1f}deg", x[8], x[6] * 57.3), {10, y0}, {200, 200, 255}, 0.6);
           y0 += line_h;
@@ -286,6 +333,49 @@ int main(int argc, char * argv[])
       // 四个装甲板（绿点，与 auto_aim_test 一致）、瞄准点（红点）
       if (!targets.empty()) {
         const auto & target = targets.front();
+        Eigen::VectorXd x = target.ekf_x();
+
+        if (x.size() >= 11) {
+          auto draw_orbit = [&](double radius, double z_world, const cv::Scalar & color) {
+            if (radius <= 1e-3) return;
+
+            std::vector<cv::Point> segment;
+            for (int i = 0; i <= 72; ++i) {
+              double theta = (2.0 * CV_PI * i) / 72.0;
+              cv::Point3f world_point(
+                static_cast<float>(x[0] + radius * std::cos(theta)),
+                static_cast<float>(x[2] + radius * std::sin(theta)),
+                static_cast<float>(z_world));
+              auto pixels = solver.world2pixel({world_point});
+              if (!pixels.empty()) {
+                cv::Point pixel(cvRound(pixels[0].x), cvRound(pixels[0].y));
+                if (
+                  pixel.x >= 0 && pixel.x < vis.cols && pixel.y >= 0 && pixel.y < vis.rows)
+                {
+                  segment.push_back(pixel);
+                  continue;
+                }
+              }
+
+              if (segment.size() >= 2) {
+                std::vector<std::vector<cv::Point>> contours = {segment};
+                cv::polylines(vis, contours, false, color, 1, cv::LINE_AA);
+              }
+              segment.clear();
+            }
+
+            if (segment.size() >= 2) {
+              std::vector<std::vector<cv::Point>> contours = {segment};
+              cv::polylines(vis, contours, false, color, 1, cv::LINE_AA);
+            }
+          };
+
+          draw_orbit(x[8], x[4], cv::Scalar(0, 255, 255));
+          if (target.armor_xyza_list().size() == 4 && (std::abs(x[9]) > 1e-3 || std::abs(x[10]) > 1e-3)) {
+            draw_orbit(x[8] + x[9], x[4] + x[10], cv::Scalar(0, 165, 255));
+          }
+        }
+
         for (const Eigen::Vector4d & xyza : target.armor_xyza_list()) {
           auto image_points =
             solver.reproject_armor(xyza.head(3), xyza[3], target.armor_type, target.name);
@@ -295,7 +385,26 @@ int main(int argc, char * argv[])
         if (aim_point.valid) {
           auto image_points = solver.reproject_armor(
             aim_point.xyza.head(3), aim_point.xyza[3], target.armor_type, target.name);
-          tools::draw_points(vis, image_points, {0, 0, 255});
+          const bool fire_ready = command.shoot;
+          const cv::Scalar fire_color = fire_ready ? cv::Scalar(0, 165, 255) : cv::Scalar(0, 0, 255);
+          tools::draw_points(vis, image_points, fire_color, fire_ready ? 4 : 2);
+        }
+
+        if (x.size() >= 5) {
+          std::vector<cv::Point3f> center_world = {
+            cv::Point3f(static_cast<float>(x[0]), static_cast<float>(x[2]), static_cast<float>(x[4]))};
+          auto center_pixels = solver.world2pixel(center_world);
+          if (!center_pixels.empty()) {
+            cv::Point center_point(cvRound(center_pixels[0].x), cvRound(center_pixels[0].y));
+            if (
+              center_point.x >= 0 && center_point.x < vis.cols && center_point.y >= 0 &&
+              center_point.y < vis.rows)
+            {
+              cv::circle(vis, center_point, 8, cv::Scalar(255, 255, 0), 5, cv::LINE_AA);
+              tools::draw_point(vis, center_point, {255, 255, 0}, 5);
+              // tools::draw_text(vis, "center", center_point + cv::Point(10, -10), {255, 255, 0}, 0.55, 2);
+            }
+          }
         }
       }
       cv::namedWindow("auto_aim", cv::WINDOW_NORMAL);

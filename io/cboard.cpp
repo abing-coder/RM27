@@ -88,8 +88,8 @@ void CBoard::send(Command command) const
     last_send_inited_ = true;
   }
 
-  int16_t yaw_i = static_cast<int16_t>(command.yaw*10);
-  int16_t pitch_i = static_cast<int16_t>(command.pitch*10);
+  int16_t yaw_i = static_cast<int16_t>(command.yaw*100);
+  int16_t pitch_i = static_cast<int16_t>(command.pitch*100);
   int16_t flag_i = command.control ? 1 : 0;    // 有无装甲板：有=1，无=0
   int16_t shoot_i = command.shoot ? 1 : 0;     // 火控：开火=1，不开火=0
   std::cout << "yaw_i: " << command.yaw << "   " << "pitch_i: " << command.pitch << std::endl;
