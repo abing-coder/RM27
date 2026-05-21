@@ -117,7 +117,7 @@ int main(int argc, char * argv[])
         double delta_yaw_pred = 0.0;
         double delta_yaw_det = 0.0;
         std::optional<double> measured_pitch;
-        std::optional<auto_aim::Armor> measured_armor;
+        std::optional<auto_aidetectorm::Armor> measured_armor;
 
         auto matched_armor = std::find_if(
           armors.begin(), armors.end(), [&](const auto_aim::Armor & armor) {

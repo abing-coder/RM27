@@ -53,6 +53,7 @@ io::Command Aimer::aim(
   debug_small_gyro_active = false;
   debug_small_gyro_armor_id = -1;
   debug_total_predict_time = 0.0;
+  debug_fly_time = 0.0;
   if (targets.empty()) return {false, false, 0, 0};
   auto target = targets.front();
   debug_small_gyro_detected = is_small_gyro(target);
@@ -60,7 +61,7 @@ io::Command Aimer::aim(
   double delay_time =
     std::abs(target.ekf_x()[7]) > decision_speed_ ? high_speed_delay_time_ : low_speed_delay_time_;
 
-  if (bullet_speed < 14) bullet_speed = 11;
+  if (bullet_speed < 14) bullet_speed = 20;
 
   auto raw_aim_point = choose_aim_point(target, false);
   debug_raw_aim_point = raw_aim_point;
@@ -133,13 +134,14 @@ io::Command Aimer::aim(
     prev_fly_time = current_traj.fly_time;
   }
 
+  debug_fly_time = current_traj.fly_time;
   Eigen::Vector3d final_xyz = debug_aim_point.xyza.head(3);
   double yaw = std::atan2(final_xyz.y(), final_xyz.x()) + yaw_offset_;
   double pitch = current_traj.pitch + pitch_offset_;           // 世界坐标系下pitch向上为负
   double pitch_d0 = -(current_traj_d0.pitch + pitch_offset_);  // 测试 d=0m 的pitch值
 
-  std::cout << "## pitch: " << pitch << std::endl;
-  std::cout << "## pitch_d0: " << pitch_d0 << std::endl;
+  // std::cout << "## pitch: " << pitch << std::endl;
+  // std::cout << "## pitch_d0: " << pitch_d0 << std::endl;
 
   return {true, false, yaw, pitch};
 }
@@ -155,7 +157,7 @@ std::optional<double> Aimer::solve_ballistic_pitch(
 std::optional<double> Aimer::solve_ballistic_pitch(
   const Eigen::Vector3d & xyz_in_world, double bullet_speed) const
 {
-  if (bullet_speed < 14) bullet_speed = 11;
+  if (bullet_speed < 14) bullet_speed = 22;
 
   double d = std::sqrt(xyz_in_world.x() * xyz_in_world.x() + xyz_in_world.y() * xyz_in_world.y());
   tools::Trajectory trajectory(bullet_speed, d, xyz_in_world.z());

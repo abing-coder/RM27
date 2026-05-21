@@ -29,6 +29,7 @@ public:
   bool debug_small_gyro_active = false;
   int debug_small_gyro_armor_id = -1;
   double debug_total_predict_time = 0.0;
+  double debug_fly_time = 0.0;  // 子弹飞行时间（秒），用于火控命中窗口判断
   explicit Aimer(const std::string & config_path);
   std::optional<double> solve_ballistic_pitch(
     const Eigen::Vector3d & xyz_in_world, double bullet_speed) const;

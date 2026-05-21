@@ -23,7 +23,8 @@ YOLO::YOLO(const std::string & config_path, bool debug)
 
   else if (yolo_name == "yolov5") {
     yolo_ = std::make_unique<YOLOV5>(config_path, debug);
-  }
+  }  return yolo_->postprocess(scale, output, bgr_img, frame_count);
+
 
   else {
     throw std::runtime_error("Unknown yolo name: " + yolo_name + "!");
