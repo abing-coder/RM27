@@ -18,9 +18,37 @@ find_package(nlohmann_json REQUIRED)
 set(OpenVINO_DIR "/opt/intel/openvino_2025.4.0/runtime/cmake/")
 find_package(OpenVINO REQUIRED)
 
+# 新版 Eigen3 的 CMake 配置可能不再设置 EIGEN3_INCLUDE_DIR（仅导出 Eigen3::Eigen 目标，
+# 在 macOS/Homebrew 上常见）。这里从导入目标里解析头文件路径作为兜底，保证各子目录都能找到 Eigen。
+if(NOT EIGEN3_INCLUDE_DIR AND TARGET Eigen3::Eigen)
+  get_target_property(EIGEN3_INCLUDE_DIR Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
+endif()
 include_directories(${EIGEN3_INCLUDE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR})
+
+# 非 Linux（如 macOS）默认无 OpenMP 头：提供极简兼容桩，使仅 #include <omp.h> 的源码可编译。
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tools/macos_compat)
+endif()
+
+# 头文件库（fmt / nlohmann_json）在某些环境（如 macOS/Homebrew）下其头文件路径不在默认搜索路径，
+# 且 OBJECT 库（如 tools）不直接链接这些 target，故从导入 target 解析其 include 路径并全局加入。
+foreach(_hdr_only_target fmt::fmt nlohmann_json::nlohmann_json)
+  if(TARGET ${_hdr_only_target})
+    get_target_property(_inc ${_hdr_only_target} INTERFACE_INCLUDE_DIRECTORIES)
+    if(_inc)
+      include_directories(${_inc})
+    endif()
+  endif()
+endforeach()
+
+# fmt 枚举兼容：对所有 C++ 源自动注入 shim，恢复旧版 fmt 对枚举的隐式格式化（详见该头注释）。
+set(FMT_ENUM_COMPAT_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/tools/fmt_enum_compat.hpp)
+add_compile_options(
+  $<$<COMPILE_LANGUAGE:CXX>:-include>
+  $<$<COMPILE_LANGUAGE:CXX>:${FMT_ENUM_COMPAT_HEADER}>
+)
 
 
 add_subdirectory(tools)

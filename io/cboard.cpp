@@ -2,8 +2,10 @@
 
 #include "cboard.hpp"
 
+#if defined(__linux__)
 #include "io/damiao_can.hpp"
 #include "io/socketcan.hpp"
+#endif
 #include "tools/math_tools.hpp"
 #include "tools/yaml.hpp"
 
@@ -25,6 +27,14 @@ CBoard::CBoard(const std::string & config_path)
     tools::logger()->info("[Cboard] Opened (CAN disabled, using identity pose).");
     return;
   }
+#if !defined(__linux__)
+  // 非 Linux 平台无 SocketCAN/达妙 SDK，无法接电控。请在 YAML 中设置 can_disabled: true
+  // 以便用视频源做纯视觉调试。
+  (void)can_interface;
+  throw std::runtime_error(
+    "[CBoard] CAN backend is only available on Linux. Set 'can_disabled: true' in the config to "
+    "run vision-only (e.g. video) debugging on this platform.");
+#else
   auto rx = std::bind(&CBoard::callback, this, std::placeholders::_1);
   if (can_interface.rfind("damiao", 0) == 0) {
     can_ = std::make_unique<DamiaoCAN>(can_interface, rx);
@@ -42,6 +52,7 @@ CBoard::CBoard(const std::string & config_path)
   queue_.pop(data_ahead_);
   queue_.pop(data_behind_);
   tools::logger()->info("[Cboard] Opened.");
+#endif
 }
 
 Eigen::Quaterniond CBoard::imu_at(std::chrono::steady_clock::time_point timestamp)
