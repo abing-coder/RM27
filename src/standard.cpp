@@ -43,6 +43,9 @@ int main(int argc, char * argv[])
   tools::Exiter exiter;
   tools::Plotter plotter;
   tools::Recorder recorder;
+  // rviz2 可视化桥：通过 UDP JSON 发给 scripts/rviz_bridge.py（conda ros2 环境），
+  // 避免在 macOS 上把 conda 的 rclcpp 与 Homebrew 依赖混链进同一个进程
+  tools::Plotter rviz_plotter("127.0.0.1", 9871);
 
   auto config_yaml = YAML::LoadFile(config_path);
   std::string aim_mode =
@@ -203,6 +206,44 @@ int main(int argc, char * argv[])
       command.shoot = false;
     }
     cboard.send(command);
+
+    // 发布整车估计与火控状态给 rviz2 桥接节点（无人监听时 UDP 直接丢弃，开销可忽略）
+    {
+      nlohmann::json rviz_json;
+      rviz_json["targets"] = nlohmann::json::array();
+      for (const auto & target : targets) {
+        Eigen::VectorXd x = target.ekf_x();
+        if (x.size() < 11) continue;
+        nlohmann::json tj;
+        tj["name"] = auto_aim::ARMOR_NAMES[target.name];
+        tj["armor_type"] = auto_aim::ARMOR_TYPES[target.armor_type];
+        tj["center"] = {x[0], x[2], x[4]};
+        tj["radius"] = x[8];
+        auto armors_json = nlohmann::json::array();
+        for (const Eigen::Vector4d & xyza : target.armor_xyza_list())
+          armors_json.push_back({xyza[0], xyza[1], xyza[2], xyza[3]});
+        tj["armors"] = armors_json;
+        rviz_json["targets"].push_back(tj);
+      }
+
+      // 火控选中的瞄准点：control 有效时标红，shoot 开火时标橙
+      const auto & aim_point = aimer.debug_aim_point;
+      if (!targets.empty() && aim_point.valid) {
+        const auto & target = targets.front();
+        rviz_json["aim"] = {
+          {"xyza", {aim_point.xyza[0], aim_point.xyza[1], aim_point.xyza[2], aim_point.xyza[3]}},
+          {"armor_type", auto_aim::ARMOR_TYPES[target.armor_type]},
+          {"control", command.control},
+          {"shoot", command.shoot}};
+      }
+
+      // 自身位姿：世界系原点 + 云台姿态四元数，桥接节点转为 TF (world -> gimbal)
+      rviz_json["self"] = {
+        {"q", {q.x(), q.y(), q.z(), q.w()}},
+        {"ypr", {ypr[0], ypr[1], ypr[2]}}};
+
+      rviz_plotter.plot(rviz_json);
+    }
 
     if (show_display) {
       const auto & draw_armors = detector.get_last_drawn_armors();
