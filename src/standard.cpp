@@ -43,8 +43,8 @@ int main(int argc, char * argv[])
   tools::Exiter exiter;
   tools::Plotter plotter;
   tools::Recorder recorder;
-  // rviz2 可视化桥：通过 UDP JSON 发给 scripts/rviz_bridge.py（conda ros2 环境），
-  // 避免在 macOS 上把 conda 的 rclcpp 与 Homebrew 依赖混链进同一个进程
+  // rviz2 可视化桥：通过 UDP JSON 发给 C++ 桥接节点 build/rviz_bridge（src/rviz_bridge.cpp），
+  // 由其转为 MarkerArray/TF 发布；主程序本身不链接 rclcpp，无 ROS 环境也可正常运行
   tools::Plotter rviz_plotter("127.0.0.1", 9871);
 
   auto config_yaml = YAML::LoadFile(config_path);

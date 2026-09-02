@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
-# 一键启动 rviz2 可视化：桥接节点 + rviz2 + 自瞄主程序。
+# 一键启动 rviz2 可视化（Ubuntu + ROS2）：C++ 桥接节点 + rviz2 + 自瞄主程序。
 # 用法:
 #   ./scripts/run_rviz.sh                        # 默认 configs/demo.yaml，带显示窗口
 #   ./scripts/run_rviz.sh configs/standard3.yaml # 指定配置
 #   NO_STANDARD=1 ./scripts/run_rviz.sh          # 只开桥接和 rviz2，主程序自己另开
+#   ROS_DISTRO=humble ./scripts/run_rviz.sh      # 指定 ROS2 发行版（默认 humble）
 set -eo pipefail
 
 cd "$(dirname "$0")/.."
 
 CONFIG="${1:-configs/demo.yaml}"
-ROS_ENV="${ROS_ENV:-ros2}"
+
+# 未 source ROS2 环境时自动加载 /opt/ros/<distro>/setup.bash
+if ! command -v ros2 >/dev/null 2>&1; then
+  ROS_SETUP="/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
+  if [ -f "$ROS_SETUP" ]; then
+    echo "[run_rviz] source $ROS_SETUP"
+    # shellcheck disable=SC1090
+    source "$ROS_SETUP"
+  else
+    echo "[run_rviz] 未找到 ROS2 环境: $ROS_SETUP，请先安装 ROS2 或设置 ROS_DISTRO" >&2
+    exit 1
+  fi
+fi
 
 pids=()
 cleanup() {
@@ -20,12 +33,18 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "[run_rviz] 启动桥接节点 (conda env: $ROS_ENV) ..."
-conda run --no-capture-output -n "$ROS_ENV" python scripts/rviz_bridge.py &
+if [ ! -x build/rviz_bridge ]; then
+  echo "[run_rviz] 未找到 build/rviz_bridge，先编译: cmake --build build --target rviz_bridge -j8"
+  [ -f build/CMakeCache.txt ] || cmake -B build
+  cmake --build build --target rviz_bridge -j8
+fi
+
+echo "[run_rviz] 启动桥接节点 ./build/rviz_bridge ..."
+./build/rviz_bridge &
 pids+=($!)
 
 echo "[run_rviz] 启动 rviz2 ..."
-conda run --no-capture-output -n "$ROS_ENV" rviz2 -d scripts/auto_aim.rviz &
+rviz2 -d scripts/auto_aim.rviz &
 pids+=($!)
 
 if [ -n "$NO_STANDARD" ]; then

@@ -64,7 +64,7 @@ use_gimbal_feedback: false # 无 IMU 时 false，仅凭指令稳定判定开火�
 # 本机用视频调试：camera_name: "video"；上车接工业相机时改回 "hikrobot"（或 "mindvision"），其余无需改动。
 camera_name: "video"
 # camera_name: "hikrobot"
-video_path: "/Users/abing/RM27/assets/demo/demo.avi"   # 视频文件路径（相对运行目录或绝对路径）
+video_path: "assets/demo/demo.avi"   # 视频文件路径（相对运行目录或绝对路径）
 video_fps: 10                       # 0 = 按视频自带帧率播放，可填具体帧率覆盖
 video_loop: true                  # 播放到结尾是否从头循环
 exposure_ms: 2

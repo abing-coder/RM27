@@ -5,6 +5,13 @@ project(sp_vision)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_BUILD_TYPE Release)
 message(STATUS "--------------------CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}--------------------")
+
+# 仅本机视频调试（无 CAN）时打开：跳过达妙 CAN SDK 的编译链接（详见 io/CMakeLists.txt）。
+# 默认 OFF，即上车实测必须带达妙 SDK，缺库直接报错，避免忘编。
+option(VIDEO_ONLY "Video-only debugging: skip Damiao CAN SDK" OFF)
+if(VIDEO_ONLY)
+  message(STATUS "--------------------VIDEO_ONLY=ON: Damiao CAN SDK skipped--------------------")
+endif()
 # 达妙 SDK 动态库（can_interface: damiao 时需能加载 libdm_device.so）
 list(APPEND CMAKE_BUILD_RPATH "${CMAKE_SOURCE_DIR}/io/damiao/lib/linux")
 list(APPEND CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib" "${CMAKE_SOURCE_DIR}/io/damiao/lib/linux")
@@ -139,6 +146,21 @@ find_package(rclcpp QUIET)
 find_package(std_msgs QUIET)
 find_package(rosidl_typesupport_cpp QUIET)
 find_package(sp_msgs QUIET)
+
+##################rviz2 可视化桥接##################
+# UDP JSON -> MarkerArray/TF 桥接节点（src/rviz_bridge.cpp），供 rviz2 显示整车估计与火控状态。
+# 仅依赖 ROS2 官方包（rclcpp / std_msgs / geometry_msgs / visualization_msgs / tf2_ros），不依赖 sp_msgs，
+# Ubuntu 上 source /opt/ros/<distro>/setup.bash 后即可编译。
+find_package(geometry_msgs QUIET)
+find_package(visualization_msgs QUIET)
+find_package(tf2_ros QUIET)
+if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND geometry_msgs_FOUND AND visualization_msgs_FOUND AND tf2_ros_FOUND)
+    add_executable(rviz_bridge src/rviz_bridge.cpp)
+    target_link_libraries(rviz_bridge nlohmann_json::nlohmann_json)
+    ament_target_dependencies(rviz_bridge rclcpp std_msgs geometry_msgs visualization_msgs tf2_ros)
+else()
+    message(STATUS "ROS2 (rclcpp/visualization_msgs/tf2_ros) not found, skipping rviz_bridge.")
+endif()
 # 只有在找到 ROS 环境时才会添加 sentry 和 publish_test
 if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND rosidl_typesupport_cpp_FOUND AND sp_msgs_FOUND)
     # 编译 sentry 和 publish_test

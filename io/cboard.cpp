@@ -3,8 +3,10 @@
 #include "cboard.hpp"
 
 #if defined(__linux__)
-#include "io/damiao_can.hpp"
 #include "io/socketcan.hpp"
+#if defined(SP_HAS_DAMIAO_CAN)
+#include "io/damiao_can.hpp"
+#endif
 #endif
 #include "tools/math_tools.hpp"
 #include "tools/yaml.hpp"
@@ -37,7 +39,14 @@ CBoard::CBoard(const std::string & config_path)
 #else
   auto rx = std::bind(&CBoard::callback, this, std::placeholders::_1);
   if (can_interface.rfind("damiao", 0) == 0) {
+#if defined(SP_HAS_DAMIAO_CAN)
     can_ = std::make_unique<DamiaoCAN>(can_interface, rx);
+#else
+    // 以 -DVIDEO_ONLY=ON 编译（见 io/CMakeLists.txt），未链接达妙 SDK，无法使用 can_interface: "damiao"
+    throw std::runtime_error(
+      "[CBoard] Built with VIDEO_ONLY=ON, Damiao CAN SDK is not linked. Rebuild without VIDEO_ONLY "
+      "for real-vehicle testing, or set 'can_disabled: true' in the config for video debugging.");
+#endif
   } else {
     can_ = std::make_unique<SocketCAN>(can_interface, rx);
   }
