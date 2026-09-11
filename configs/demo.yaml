@@ -86,7 +86,7 @@ gun_yaw_offset: -1.3      # degree，枪口在相机 yaw 方向偏移，正=枪�
 gun_pitch_offset: -3.3  # degree，枪口在相机 pitch 方向偏移，正=枪口在相机上方
 
 #####-----cboard参数-----#####
-can_disabled: false    # 无 CAN 时 true；接上达妙后改为 false
+can_disabled: true    # 无 CAN 时 true；接上达妙后改为 false
 can_send_only: true    # 仅上位机发送给电控，不等待四元数/弹速等反馈（单向通信）
 can_send_hz: 100.0     # CAN 发送频率（Hz），0 或缺失=按图像帧率发送
 quaternion_canid: 0x100
