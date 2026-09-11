@@ -1,5 +1,5 @@
-# enemy_color: "red"
-enemy_color: "blue"
+enemy_color: "red"
+# emy_color: "blue"
 
 
 #####-----神经网络参数-----#####
@@ -62,8 +62,8 @@ auto_fire: true # 是否由自瞄控制射击
 use_gimbal_feedback: false # 无 IMU 时 false，仅凭指令稳定判定开火；有 IMU 时 true
 
 # 本机用视频调试：camera_name: "video"；上车接工业相机时改回 "hikrobot"（或 "mindvision"），其余无需改动。
-camera_name: "video"
-# camera_name: "hikrobot"
+# camera_name: "video"
+camera_name: "hikrobot"
 video_path: "assets/demo/demo.avi"   # 视频文件路径（相对运行目录或绝对路径）
 video_fps: 10                       # 0 = 按视频自带帧率播放，可填具体帧率覆盖
 video_loop: true                  # 播放到结尾是否从头循环
@@ -74,11 +74,12 @@ vid_pid: "2bdf:0001"
 # -1  0  0
 #  0 -1  0
 #  0  0  1
-R_gimbal2imubody: [-1, 0, 0, 0, -1, 0, 0, 0, 1]
+# gimbal2imubody: [-1, 0, 0, 0, -1, 0, 0, 0, 1]
+R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
 
 # 重投影误差: 0.2697px
-camera_matrix: [2308.72631, 0, 738.39422, 0, 2308.31509, 601.2956, 0, 0, 1]
-distort_coeffs: [-0.062052, 0.014239, 0.004172, -0.000216, 0.000000]
+camera_matrix: [2305.318877673807, 0, 725.1731477993934, 0, 2308.3727414646028, 520.40776060678024, 0, 0, 1]
+distort_coeffs: [-0.06785805361033849, 0.0019322191823343644, 0.0019251974919497093, -4.2150620769366041e-05, 0]
 
 # 相机同理想情况的偏角: yaw0.46 pitch0.61 roll-1.53 degree
 R_camera2gimbal: [-0.0083195760046954614, 0.010498791137270739, 0.99991027599468041, -0.99960756138647755, -0.026835747568381807, -0.0080352891314148939, 0.026748978935305992, -0.99958472279097077, 0.010717933047771133]

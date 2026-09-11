@@ -1,0 +1,76 @@
+# =============================================================================
+# 棋盘格标定配置（改这个文件即可，然后运行 ./calib_chessboard/run.sh）
+# =============================================================================
+# 内角点 ≠ 格子数。例如棋盘是 9 列 × 6 行「格子」，内角点一般是 8 × 5。
+# 请先数清：横着能点几个内角点、竖着能点几个，再用尺子量相邻角点间距（mm）。
+# =============================================================================
+
+##### 要跑哪些步骤（无 IMU 时 handeye 会自动跳过） #####
+steps:
+  capture: true        # 打开相机采图（已有 data/*.jpg 可改 false）
+  intrinsics: true     # 相机内参 camera_matrix / distort_coeffs
+  handeye: true        # 手眼 R_camera2gimbal / t_camera2gimbal（必须 use_imu: true）
+
+# 没接 IMU / CAN 时务必 false：只采图、只标内参，不打开 C 板
+use_imu: false
+
+##### 棋盘格 #####
+chessboard:
+  inner_corners_cols: 7     # 内角点列数（横向）
+  inner_corners_rows: 7     # 内角点行数（纵向）
+  square_size_mm: 20.0       # 相邻内角点中心距，单位毫米
+  detector: sb               # sb=更稳（推荐） / classic=传统 findChessboardCorners
+
+##### 路径（相对仓库根目录） #####
+data_dir: calib_chessboard/data
+output_yaml: calib_chessboard/output/result.yaml
+# 标定成功后把结果写回机器人配置；留空则只写 output_yaml
+export_to: ""                # 例如 configs/demo.yaml
+
+##### 采集 #####
+capture:
+  min_frames: 15             # 建议至少这么多张（远近、左右、俯仰都要有）
+  preview_scale: 0.5         # 预览缩放
+  require_board: true        # 未检测到棋盘格时拒绝保存
+  auto_save: true            # true=和 ROS 一样，姿态够新就自动收图，不用一直按 s
+  auto_save_interval_s: 1.5
+  auto_min_corner_shift_px: 40
+  show_each: false           # true=内参时逐张暂停；标定请保持 false，按一次 C 就会自动算完
+
+
+##### 内参 / 手眼算法 #####
+calib:
+  fix_k3: true               # 小视场工业相机建议 true
+  handeye_method: tsai       # tsai / park / horaud / andreff / daniilidis
+
+##### 相机（与主程序同一套字段） #####
+# opencv     : 普通 USB 摄像头（免 SDK，桌面标定最方便）
+# hikrobot   : 海康工业相机
+# mindvision : 迈德威视
+# video      : 本地视频，仅调试流程
+camera_name: "hikrobot"
+opencv_device: 0
+opencv_width: 1280
+opencv_height: 720
+
+# 工业相机（camera_name 改为 hikrobot / mindvision 时生效）
+# 标定棋盘格要比自瞄亮得多：自瞄常用 2~3ms，这里默认 25ms；仍偏暗就继续加大
+exposure_ms: 25
+gain: 16.0
+gamma: 0.5
+vid_pid: "2bdf:0001"
+
+# camera_name: video 时
+video_path: "assets/demo/demo.avi"
+video_fps: 10
+video_loop: true
+
+##### IMU / CAN（仅 use_imu: true 时使用） #####
+# 按 C 板安装填写，采集画面上的 yaw/pitch/roll 应与云台动作同号
+R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+quaternion_canid: 0x100
+bullet_speed_canid: 0x101
+send_canid: 0x520
+can_interface: "can0"
+can_disabled: false
+can_send_only: false
