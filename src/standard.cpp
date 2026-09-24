@@ -9,6 +9,7 @@
 
 #include "io/camera.hpp"
 #include "io/cboard.hpp"
+#include "io/dm_imu/dm_imu.hpp"
 #include "tasks/auto_aim/armor.hpp"
 #include "tasks/auto_aim/aimer.hpp"
 #include "tasks/auto_aim/multithread/commandgener.hpp"
@@ -59,6 +60,17 @@ int main(int argc, char * argv[])
   io::CBoard cboard(config_path);
   io::Camera camera(config_path);
 
+  // 姿态只来自 USB 上的 DM-IMU，不使用电控回传的四元数。
+  const auto imu_port = config_yaml["dm_imu_port"]
+                          ? config_yaml["dm_imu_port"].as<std::string>()
+                          : std::string("/dev/ttyACM0");
+  io::DM_IMU dm_imu(imu_port);
+  if (aim_mode == "delta") {
+    tools::logger()->warn(
+      "[standard] 姿态已使用 USB IMU 四元数，但 aim_mode=delta 时下发 yaw 仍是像素差值。"
+      "要用这路姿态做世界系绝对角，请把 aim_mode 改为 absolute。");
+  }
+
   // 开显示时同时开 YOLO 的 detection 窗口，便于对比是否有检测结果
   auto_aim::YOLO detector(config_path, show_display);
   auto_aim::Solver solver(config_path);
@@ -79,7 +91,7 @@ int main(int argc, char * argv[])
   while (!exiter.exit()) {
     frame_count++;
     camera.read(img, t);
-    q = cboard.imu_at(t - 1ms);
+    q = dm_imu.imu_at(t - 1ms);
     mode = cboard.mode;
 
     if (last_mode != mode) {
@@ -237,9 +249,10 @@ int main(int argc, char * argv[])
           {"shoot", command.shoot}};
       }
 
-      // 自身位姿：世界系原点 + 云台姿态四元数，桥接节点转为 TF (world -> gimbal)
+      // 自身位姿与解算器使用同一旋转：IMU 四元数经 R_gimbal2imubody 得到云台姿态。
+      Eigen::Quaterniond q_gimbal(solver.R_gimbal2world());
       rviz_json["self"] = {
-        {"q", {q.x(), q.y(), q.z(), q.w()}},
+        {"q", {q_gimbal.x(), q_gimbal.y(), q_gimbal.z(), q_gimbal.w()}},
         {"ypr", {ypr[0], ypr[1], ypr[2]}}};
 
       rviz_plotter.plot(rviz_json);

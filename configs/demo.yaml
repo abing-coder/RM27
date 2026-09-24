@@ -26,7 +26,7 @@ use_roi: false
 threshold: 150
 max_angle_error: 45 # degree
 min_lightbar_ratio: 1.5
-max_lightbar_ratio: 20
+max_lightbar_ratio: 20       
 min_lightbar_length: 8
 min_armor_ratio: 1
 max_armor_ratio: 5
@@ -59,7 +59,7 @@ fire_ready_consecutive_frames: 2  # 连续满足开火条件 N 帧才触发，�
 fire_cooldown_ms: 20              # 两次触发开火之间的最小间隔（ms）
 judge_distance: 4 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
-use_gimbal_feedback: false # 无 IMU 时 false，仅凭指令稳定判定开火；有 IMU 时 true
+use_gimbal_feedback: true # 用 USB IMU 的云台 yaw 判断枪口是否跟上
 
 # 本机用视频调试：camera_name: "video"；上车接工业相机时改回 "hikrobot"（或 "mindvision"），其余无需改动。
 # camera_name: "video"
@@ -75,7 +75,7 @@ vid_pid: "2bdf:0001"
 #  0 -1  0
 #  0  0  1
 # gimbal2imubody: [-1, 0, 0, 0, -1, 0, 0, 0, 1]
-R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+R_gimbal2imubody: [-1, 0, 0, 0, -1, 0, 0, 0, 1]
 
 # 重投影误差: 0.2697px
 camera_matrix: [2305.318877673807, 0, 725.1731477993934, 0, 2308.3727414646028, 520.40776060678024, 0, 0, 1]
@@ -86,7 +86,9 @@ R_camera2gimbal: [-0.0083195760046954614, 0.010498791137270739, 0.99991027599468
 t_camera2gimbal: [0.094969301833534511, 0.095006290298006682, 0.050987066291756609]
 
 #####-----自瞄输出模式-----#####
-aim_mode: "delta"     # "delta" = 无IMU：yaw 发预测像点差值，pitch 用 detector 裸测量点做弹道预测；"absolute" = 预测+弹道绝对角
+aim_mode: "absolute"     # "delta" = yaw 发预测像点差值，pitch 用 detector 裸测量点做弹道；"absolute" = 用 USB IMU 姿态发世界系绝对角
+# 姿态始终来自 USB 上的 DM-IMU，不使用电控回传四元数。aim_mode 只决定下发给云台的角度怎么算。
+dm_imu_port: "/dev/ttyACM0"
 # 枪口相对相机光轴的偏移（度），需自行调试后填入；开火判定以枪口对准为准（即发送的 command 为枪口差值）
 gun_yaw_offset: -1.3      # degree，枪口在相机 yaw 方向偏移，正=枪口在相机右侧
 gun_pitch_offset: -3.3  # degree，枪口在相机 pitch 方向偏移，正=枪口在相机上方
