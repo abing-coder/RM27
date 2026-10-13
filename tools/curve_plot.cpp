@@ -102,9 +102,8 @@ void CurvePlot::draw(cv::Mat & img, const cv::Rect & area) const
     }
     flush();
   };
-  // 检测在下层画粗，预测在上层画细，两条重合时也都看得见
-  draw_series(&Sample::green, GREEN, 3);
-  draw_series(&Sample::red, RED, 1);
+  draw_series(&Sample::green, GREEN, 2);
+  draw_series(&Sample::red, RED, 2);
 }
 
 }  // namespace tools

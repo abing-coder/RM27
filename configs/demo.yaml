@@ -50,14 +50,13 @@ low_speed_delay_time: 0.015 # s
 small_gyro_speed_thresh: 2.5 # rad/s，小陀螺判定阈值
 
 #####-----shooter参数-----#####
-first_tolerance: 4 # 近距离射击容差，degree
-second_tolerance: 4 # 远距离射击容差，degree
+first_tolerance: 3 # 近距离射击容差，degree
+second_tolerance: 2 # 远距离射击容差，degree
 small_gyro_fire_yaw_thresh: 6.0 # degree，小陀螺预测装甲板过枪线开火阈值
 fire_window_yaw_thresh_deg: 1.5   # degree，普通目标：预测装甲板进入枪线的 yaw 窗口
 fire_window_pitch_thresh_deg: 2.0 # degree，普通目标：预测装甲板进入枪线的 pitch 窗口
 fire_ready_consecutive_frames: 2  # 连续满足开火条件 N 帧才触发，抑制抖动/浪费弹药
-fire_cooldown_ms: 20              # 两次触发开火之间的最小间隔（ms）
-judge_distance: 4 #距离判断阈值
+judge_distance: 2 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 use_gimbal_feedback: true # 用 USB IMU 的云台 yaw 判断枪口是否跟上
 
@@ -91,8 +90,8 @@ aim_mode: "absolute"     # "delta" = yaw 用预测像点差值，pitch 用 detec
 # 姿态始终来自 USB 上的 DM-IMU，不使用电控回传四元数。aim_mode 只决定下发给云台的角度怎么算。
 dm_imu_port: "/dev/ttyACM0"
 # 枪口相对相机光轴的偏移（度），需自行调试后填入；开火判定以枪口对准为准（即发送的 command 为枪口差值）
-gun_yaw_offset: -1.3      # degree，枪口在相机 yaw 方向偏移，正=枪口在相机右侧
-gun_pitch_offset: -3.3  # degree，枪口在相机 pitch 方向偏移，正=枪口在相机上方
+gun_yaw_offset: 1      # degree，枪口在相机 yaw 方向偏移，正=枪口在相机右侧
+gun_pitch_offset: 2  # degree，枪口在相机 pitch 方向偏移，正=枪口在相机上方
 
 #####-----cboard参数-----#####
 can_disabled: true   # 无 CAN 时 true；接上达妙后改为 false

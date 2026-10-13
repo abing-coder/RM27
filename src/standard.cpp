@@ -22,6 +22,7 @@
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/curve_plot.hpp"
+#include "tools/trajectory.hpp"
 #include "tools/plotter.hpp"
 #include "tools/recorder.hpp"
 
@@ -219,7 +220,16 @@ int main(int argc, char * argv[])
           delta_yaw_det = delta_det[0];
           has_detect_yaw = true;
           solver.solve(det_armor);
-          measured_pitch = aimer.solve_ballistic_pitch(det_armor.xyz_in_world, cboard.bullet_speed);
+          // 与原版 Aimer 相同的弹道公式。原版 pitch 抬头为负，这里取反后抬头为正，和下发约定一致。
+          double speed = cboard.bullet_speed < 14 ? 23 : cboard.bullet_speed;
+          const auto & xyz = det_armor.xyz_in_world;
+          double d = std::sqrt(xyz.x() * xyz.x() + xyz.y() * xyz.y());
+          tools::Trajectory traj(speed, d, xyz.z());
+          if (!traj.unsolvable) {
+            const double pitch_offset = config_yaml["pitch_offset"].as<double>() / 57.3;
+            // 弹道角抬头为正，与下发约定一致；原版 Aimer 再取一次负号后抬头为负。
+            measured_pitch = traj.pitch + pitch_offset;
+          }
         }
 
         // 无 IMU 的 delta 模式下，仍要求当前帧存在检测结果，避免纯 tracker 预测导致 yaw 抽动
@@ -249,12 +259,12 @@ int main(int argc, char * argv[])
         command.pitch = 0;
       }
     } else {
-      // 绝对模式：Aimer 给出世界系目标角（弧度，yaw 左转为正、pitch 抬头为正）。
-      // 电控要的是相对当前云台的差值，约定与 delta 模式一致：yaw 右转为正、pitch 抬头为正，单位度。
+      // 原版 Aimer：yaw 左转为正，pitch 抬头为负。电控约定 yaw 右转为正、pitch 抬头为正。
       const double rad2deg = 180.0 / 3.141592653589793;
+      command.pitch = -command.pitch;
       const double gimbal_pitch_up = -ypr[1];  // 绕 +Y 正转是低头
       // Shooter 用 IMU 云台 yaw 判断是否跟上，这里给它云台应到达的世界系角度
-      fire_cmd.yaw = command.yaw * rad2deg + gun_yaw_offset_deg;
+      fire_cmd.yaw = aim_world.yaw * rad2deg + gun_yaw_offset_deg;
       fire_cmd.pitch = command.pitch * rad2deg - gun_pitch_offset_deg;
       if (command.control) {
         command.yaw = -tools::limit_rad(command.yaw - ypr[0]) * rad2deg - gun_yaw_offset_deg;
@@ -399,9 +409,7 @@ int main(int argc, char * argv[])
             "Target {} {}  id {}  dist {:.2f} m", auto_aim::ARMOR_NAMES[target.name],
             auto_aim::ARMOR_TYPES[target.armor_type], target.last_id, std::hypot(x[0], x[2], x[4])),
           white);
-        const char * gyro =
-          aimer.debug_small_gyro_active ? "ON" : (aimer.debug_small_gyro_detected ? "YES" : "NO");
-        line(fmt::format("  w {:+.2f} rad/s  r {:.2f}  gyro {}", x[7], x[8], gyro), white);
+        line(fmt::format("  w {:+.2f} rad/s  r {:.2f}", x[7], x[8]), white);
       } else {
         line("Target --", gray);
       }
@@ -412,32 +420,15 @@ int main(int argc, char * argv[])
             "Aim   yaw {:+.2f}  pitch {:+.2f} (world)", aim_world.yaw * rad2deg,
             aim_world.pitch * rad2deg),
           white);
-        // Aimer 在弹速 < 14 m/s（没有电控回传）时按 20 m/s 解弹道
         const bool default_speed = cboard.bullet_speed < 14;
         line(
-          fmt::format(
-            "  fly {:.0f} ms  predict {:.0f} ms  v {:.1f}{}", aimer.debug_fly_time * 1e3,
-            aimer.debug_total_predict_time * 1e3, default_speed ? 20.0 : cboard.bullet_speed,
-            default_speed ? " default" : ""),
+          fmt::format("  v {:.1f}{}", default_speed ? 23.0 : cboard.bullet_speed, default_speed ? " default" : ""),
           default_speed ? orange : white);
       }
 
-      if (aimer.debug_small_gyro_active) {
-        const bool open = shooter.debug_small_gyro_fire_window;
-        line(
-          fmt::format(
-            "Fire  gyro window {}  yaw_err {}", open ? "OPEN" : "CLOSE",
-            opt_deg(shooter.debug_small_gyro_yaw_error_deg)),
-          open ? green : orange);
-      } else {
-        const bool ok = shooter.debug_hit_window_ok;
-        line(
-          fmt::format(
-            "Fire  hit {}  err y {} p {}  streak {}", ok ? "OK" : "NO",
-            opt_deg(shooter.debug_hit_yaw_error_deg), opt_deg(shooter.debug_hit_pitch_error_deg),
-            shooter.debug_fire_ready_streak),
-          ok ? green : white);
-      }
+      line(
+        fmt::format("Fire  streak {}", shooter.debug_fire_ready_streak),
+        command.shoot ? green : white);
 
       if (pred_ypd && det_ypd) {
         line(
