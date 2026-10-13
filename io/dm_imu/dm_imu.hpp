@@ -38,7 +38,8 @@ private:
   bool try_consume_frame();
   void push_attitude(const Eigen::Quaterniond & q, bool from_quaternion);
 
-  static uint16_t crc16(const uint8_t * data, uint16_t len);
+  static uint16_t crc16_ccitt(const uint8_t * data, uint16_t len);
+  static uint16_t crc16_shift1(const uint8_t * data, uint16_t len);
 
   std::string port_;
   serial::Serial serial_;
@@ -50,6 +51,7 @@ private:
 
   std::atomic<bool> stop_thread_{false};
   bool have_quaternion_{false};
+  int crc_kind_{0};  // 0 未锁定，1 附录四的 crc<<1，2 标准 CCITT
 };
 
 }  // namespace io

@@ -51,10 +51,25 @@ constexpr std::array<uint16_t, 256> make_crc16_table()
 }
 }  // namespace
 
-uint16_t DM_IMU::crc16(const uint8_t * data, uint16_t len)
+uint16_t DM_IMU::crc16_ccitt(const uint8_t * data, uint16_t len)
 {
-  // 附录四 Get_CRC16。表虽是 CCITT，但固件写的是 crc << 1，不能改成标准的 << 8。
-  // 实测 CRC 为小端，紧挨帧尾 0x0A。
+  // CRC-16/CCITT-FALSE：初值 0xFFFF，多项式 0x1021，无反射。当前模块输出与此一致，CRC 小端。
+  uint16_t crc = 0xFFFF;
+  for (uint16_t i = 0; i < len; ++i) {
+    crc ^= static_cast<uint16_t>(data[i]) << 8;
+    for (int bit = 0; bit < 8; ++bit) {
+      if (crc & 0x8000)
+        crc = static_cast<uint16_t>((crc << 1) ^ 0x1021);
+      else
+        crc = static_cast<uint16_t>(crc << 1);
+    }
+  }
+  return crc;
+}
+
+uint16_t DM_IMU::crc16_shift1(const uint8_t * data, uint16_t len)
+{
+  // 附录四把上式写成了 crc << 1。旧固件按这个非标准写法计算。
   static constexpr auto table = make_crc16_table();
   uint16_t crc = 0xFFFF;
   for (uint16_t i = 0; i < len; ++i) {
@@ -166,9 +181,29 @@ bool DM_IMU::try_consume_frame()
     return true;
   }
 
-  const uint16_t calc = crc16(rx_.data(), static_cast<uint16_t>(len - 3));
+  const uint8_t * body = rx_.data();
+  const auto body_len = static_cast<uint16_t>(len - 3);
   const uint16_t got = static_cast<uint16_t>(rx_[len - 3] | (rx_[len - 2] << 8));
-  if (calc != got) {
+  const uint16_t ccitt = crc16_ccitt(body, body_len);
+  const uint16_t shift1 = crc16_shift1(body, body_len);
+  uint16_t calc = ccitt;
+  bool crc_ok = false;
+  if (crc_kind_ == 0) {
+    if (ccitt == got) {
+      crc_kind_ = 2;
+      crc_ok = true;
+    } else if (shift1 == got) {
+      crc_kind_ = 1;
+      calc = shift1;
+      crc_ok = true;
+    }
+  } else if (crc_kind_ == 1) {
+    calc = shift1;
+    crc_ok = shift1 == got;
+  } else {
+    crc_ok = ccitt == got;
+  }
+  if (!crc_ok) {
     static int mismatches = 0;
     if (mismatches++ % 200 == 0) {
       tools::logger()->warn(

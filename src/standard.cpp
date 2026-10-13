@@ -21,6 +21,7 @@
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/curve_plot.hpp"
 #include "tools/plotter.hpp"
 #include "tools/recorder.hpp"
 
@@ -80,6 +81,49 @@ int main(int argc, char * argv[])
 
   const bool use_delta_aim = (aim_mode == "delta");  // 无 IMU：yaw 发差值，pitch 可复用弹道
 
+  // rviz2 里的相机与虚拟枪口，都是相对 gimbal 的固定变换
+  const auto R_camera2gimbal_data = config_yaml["R_camera2gimbal"].as<std::vector<double>>();
+  const auto t_camera2gimbal_data = config_yaml["t_camera2gimbal"].as<std::vector<double>>();
+  const Eigen::Quaterniond q_camera2gimbal =
+    Eigen::Quaterniond(Eigen::Matrix<double, 3, 3, Eigen::RowMajor>(R_camera2gimbal_data.data()))
+      .normalized();
+  const Eigen::Vector3d t_camera2gimbal(t_camera2gimbal_data.data());
+
+  // 虚拟枪口：云台执行下发角后指向瞄准点的方向。云台比理想方向多转了补偿角，所以枪口相对 gimbal 转了 -补偿。
+  // 下发 yaw 右转为正、减去 gun_yaw_offset，换成左转为正就是 +gun_yaw_offset；
+  // delta 模式的 yaw 来自像素差，不叠加 Aimer 的 yaw_offset。
+  constexpr double deg2rad = 3.141592653589793 / 180.0;
+  const double yaw_comp_deg =
+    (use_delta_aim ? 0.0 : config_yaml["yaw_offset"].as<double>()) + gun_yaw_offset_deg;
+  const double pitch_comp_deg = config_yaml["pitch_offset"].as<double>() - gun_pitch_offset_deg;
+  // 绕 +Z 为左转；抬头为正的 pitch 对应绕 +Y 的负转角
+  const Eigen::Quaterniond q_barrel2gimbal(
+    Eigen::AngleAxisd(-yaw_comp_deg * deg2rad, Eigen::Vector3d::UnitZ()) *
+    Eigen::AngleAxisd(pitch_comp_deg * deg2rad, Eigen::Vector3d::UnitY()));
+
+  // 调试窗口的一步预测曲线：上一帧跟踪结果外推到本帧时刻（红） vs 本帧检测（绿），世界系角度
+  tools::CurvePlot yaw_plot("yaw", "deg");
+  tools::CurvePlot pitch_plot("pitch", "deg");
+  std::optional<auto_aim::Target> prev_target;
+  const auto t_start = std::chrono::steady_clock::now();
+  auto last_loop_time = t_start;
+  double fps = 0;
+  if (show_display) cv::namedWindow("auto_aim", cv::WINDOW_NORMAL);
+
+  // 预测目标里离检测最近的那块装甲板；没有检测时用上一帧跟踪的那块
+  auto nearest_armor_xyz = [](
+                             const auto_aim::Target & target,
+                             const std::optional<Eigen::Vector3d> & det_xyz) -> Eigen::Vector3d {
+    const auto xyza_list = target.armor_xyza_list();
+    const int last = std::clamp(target.last_id, 0, static_cast<int>(xyza_list.size()) - 1);
+    Eigen::Vector3d best = xyza_list[last].head<3>();
+    if (!det_xyz) return best;
+    for (const auto & xyza : xyza_list) {
+      if ((xyza.head<3>() - *det_xyz).norm() < (best - *det_xyz).norm()) best = xyza.head<3>();
+    }
+    return best;
+  };
+
   cv::Mat img;
   Eigen::Quaterniond q;
   std::chrono::steady_clock::time_point t;
@@ -117,6 +161,7 @@ int main(int argc, char * argv[])
     size_t armors_after_color = armors.size();
 
     auto command = aimer.aim(targets, t, cboard.bullet_speed);
+    const io::Command aim_world = command;  // Aimer 原始输出（世界系，弧度），调试显示用
     io::Command fire_cmd = command;  // 专门给 Shooter 用的指令（可单独修改 yaw 基准）
     // 统一约定：io::Command 中 yaw/pitch 以“度”为单位
     // delta 模式：yaw 使用预测瞄准点的差值，pitch 使用 detector 裸测量点的弹道预测结果
@@ -204,11 +249,20 @@ int main(int argc, char * argv[])
         command.pitch = 0;
       }
     } else {
-      // 绝对模式：Aimer 输出为弧度，这里统一转为“度”再发送/用于火控
+      // 绝对模式：Aimer 给出世界系目标角（弧度，yaw 左转为正、pitch 抬头为正）。
+      // 电控要的是相对当前云台的差值，约定与 delta 模式一致：yaw 右转为正、pitch 抬头为正，单位度。
       const double rad2deg = 180.0 / 3.141592653589793;
-      command.yaw = command.yaw * rad2deg - gun_yaw_offset_deg;
-      command.pitch = command.pitch * rad2deg - gun_pitch_offset_deg;
-      fire_cmd = command;
+      const double gimbal_pitch_up = -ypr[1];  // 绕 +Y 正转是低头
+      // Shooter 用 IMU 云台 yaw 判断是否跟上，这里给它云台应到达的世界系角度
+      fire_cmd.yaw = command.yaw * rad2deg + gun_yaw_offset_deg;
+      fire_cmd.pitch = command.pitch * rad2deg - gun_pitch_offset_deg;
+      if (command.control) {
+        command.yaw = -tools::limit_rad(command.yaw - ypr[0]) * rad2deg - gun_yaw_offset_deg;
+        command.pitch = (command.pitch - gimbal_pitch_up) * rad2deg - gun_pitch_offset_deg;
+      } else {
+        command.yaw = 0;
+        command.pitch = 0;
+      }
     }
     // 火控 shoot：control=1 且存在目标时，由 Shooter 判定是否开火
     if (command.control && !targets.empty()) {
@@ -254,6 +308,11 @@ int main(int argc, char * argv[])
       rviz_json["self"] = {
         {"q", {q_gimbal.x(), q_gimbal.y(), q_gimbal.z(), q_gimbal.w()}},
         {"ypr", {ypr[0], ypr[1], ypr[2]}}};
+      rviz_json["camera"] = {
+        {"t", {t_camera2gimbal.x(), t_camera2gimbal.y(), t_camera2gimbal.z()}},
+        {"q", {q_camera2gimbal.x(), q_camera2gimbal.y(), q_camera2gimbal.z(), q_camera2gimbal.w()}}};
+      rviz_json["barrel"] = {
+        {"q", {q_barrel2gimbal.x(), q_barrel2gimbal.y(), q_barrel2gimbal.z(), q_barrel2gimbal.w()}}};
 
       rviz_plotter.plot(rviz_json);
     }
@@ -261,112 +320,148 @@ int main(int argc, char * argv[])
     if (show_display) {
       const auto & draw_armors = detector.get_last_drawn_armors();
       cv::Mat vis = img.clone();
+      const double rad2deg = 180.0 / 3.141592653589793;
 
-      int line_h = 28;
-      int y0 = 30;
-      const int panel_w = 480;
-      const int panel_h = 580;
-      // 半透明黑色背景，保证 Tracker/Estimator 文字在任何画面下都清晰可见
-      cv::Mat vis_roi = vis(cv::Rect(0, 0, panel_w, panel_h));
-      cv::Mat panel(panel_h, panel_w, vis.type(), cv::Scalar(0, 0, 0));
-      cv::Mat blended;
-      cv::addWeighted(panel, 0.5, vis_roi, 0.5, 0, blended);
-      blended.copyTo(vis_roi);
+      const auto now = std::chrono::steady_clock::now();
+      const double loop_dt = tools::delta_time(now, last_loop_time);
+      last_loop_time = now;
+      if (loop_dt > 0) fps = fps > 0 ? 0.9 * fps + 0.1 / loop_dt : 1.0 / loop_dt;
 
-      // 帧号（用于确认画面在更新）
-      tools::draw_text(vis, fmt::format("frame: {}", frame_count), {10, y0}, {0, 255, 255}, 0.7);
-      y0 += line_h;
-      // ----- 跟踪器 -----
-      tools::draw_text(vis, "Tracker:", {10, y0}, {0, 255, 255}, 0.7);
-      y0 += line_h;
-      tools::draw_text(vis, fmt::format("  state: [{}]", tracker.state()), {10, y0}, {255, 255, 255}, 0.6);
-      y0 += line_h;
-      tools::draw_text(vis, fmt::format("  armors: {} (enemy: {})  targets: {}", armors_raw, armors_after_color, targets.size()), {10, y0}, {255, 255, 255}, 0.6);
-      y0 += line_h;
-      // 有绿框但跟踪器不触发：enemy_color 过滤掉了所有检测，给出可操作提示
-      if (armors_raw > 0 && armors_after_color == 0 && !draw_armors.empty()) {
-        const auto & first = draw_armors.front();
-        std::string det_color = (first.color <= auto_aim::Color::purple) ? auto_aim::COLORS[static_cast<size_t>(first.color)] : "?";
-        tools::draw_text(vis, fmt::format("  >> config enemy_color to \"{}\" (now filtered to 0)", det_color), {10, y0}, {0, 200, 255}, 0.55);
-        y0 += line_h;
-      }
-      // ----- 整车估计器 11维 (EKF) -----
-      /*
-      旋转中心位置：x y z
-      旋转中心速度：vx vy vz
-      车体角度：a
-      角速度：w
-      主半径：r
-      长短轴差：l
-      高低差：h
-      */
-      tools::draw_text(vis, "Estimator:", {10, y0}, {0, 255, 255}, 0.7);
-      y0 += line_h;
+      // 一步预测：上一帧的跟踪结果外推到本帧时刻，对比本帧检测解算出的同一块装甲板
+      std::optional<Eigen::Vector3d> det_ypd, pred_ypd;
       if (!targets.empty()) {
         const auto & target = targets.front();
-        tools::draw_text(vis, fmt::format("  armor_id: {}", target.last_id), {10, y0}, {255, 255, 255}, 0.6);
-        y0 += line_h;
-        Eigen::VectorXd x = target.ekf_x();
-        if (x.size() >= 11) {
-          tools::draw_text(vis, fmt::format("  xyz: ({:.2f},{:.2f},{:.2f})", x[0], x[2], x[4]), {10, y0}, {200, 200, 255}, 0.6);
-          y0 += line_h;
-          tools::draw_text(vis, fmt::format("  vxy: ({:.2f},{:.2f}) w:{:.2f}", x[1], x[3], x[7]), {10, y0}, {200, 200, 255}, 0.6);
-          y0 += line_h;
-          std::string gyro_text = aimer.debug_small_gyro_detected ? "YES" : "NO";
-          std::string anti_top_text = aimer.debug_small_gyro_active ? "ON" : "OFF";
-          tools::draw_text(
-            vis,
-            fmt::format(
-              "  gyro: {}  anti-top: {}  id: {}", gyro_text, anti_top_text,
-              aimer.debug_small_gyro_armor_id),
-            {10, y0},
-            aimer.debug_small_gyro_detected ? cv::Scalar(0, 200, 255) : cv::Scalar(200, 200, 255),
-            0.6);
-          y0 += line_h;
-          std::string fire_window_text =
-            shooter.debug_small_gyro_fire_window ? "OPEN" : "CLOSE";
-          if (shooter.debug_small_gyro_yaw_error_deg.has_value()) {
-            tools::draw_text(
-              vis,
-              fmt::format(
-                "  yaw_err: {:.2f} deg  fire_win: {}", shooter.debug_small_gyro_yaw_error_deg.value(),
-                fire_window_text),
-              {10, y0},
-              shooter.debug_small_gyro_fire_window ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 165, 255),
-              0.6);
-          } else {
-            tools::draw_text(
-              vis, "  yaw_err: --  fire_win: --", {10, y0}, {160, 160, 160}, 0.6);
-          }
-          y0 += line_h;
-          tools::draw_text(vis, fmt::format("  r:{:.2f} a:{:.1f}deg", x[8], x[6] * 57.3), {10, y0}, {200, 200, 255}, 0.6);
-          y0 += line_h;
+        std::optional<Eigen::Vector3d> det_xyz;
+        for (auto armor : armors) {
+          if (armor.name != target.name || armor.type != target.armor_type) continue;
+          solver.solve(armor);
+          det_xyz = armor.xyz_in_world;
+          det_ypd = armor.ypd_in_world;
+          break;
         }
+        if (prev_target && prev_target->name == target.name) {
+          auto predicted = *prev_target;
+          predicted.predict(t);
+          pred_ypd = tools::xyz2ypd(nearest_armor_xyz(predicted, det_xyz));
+        }
+      }
+      prev_target = targets.empty() ? std::nullopt : std::make_optional(targets.front());
+
+      auto angle_deg = [&](const std::optional<Eigen::Vector3d> & ypd, int i) -> std::optional<double> {
+        if (!ypd) return std::nullopt;
+        return (*ypd)[i] * rad2deg;
+      };
+      const double t_plot = tools::delta_time(t, t_start);
+      yaw_plot.push(t_plot, angle_deg(pred_ypd, 0), angle_deg(det_ypd, 0));
+      pitch_plot.push(t_plot, angle_deg(pred_ypd, 1), angle_deg(det_ypd, 1));
+
+      // ----- 画面下方的调试栏：左侧文字，右侧 yaw / pitch 曲线 -----
+      constexpr int strip_h = 420;
+      constexpr int text_w = 600;
+      cv::Mat strip(strip_h, vis.cols, vis.type(), cv::Scalar(15, 15, 15));
+      int text_y = 34;
+      auto line = [&](const std::string & text, const cv::Scalar & color, double scale = 0.65) {
+        tools::draw_text(strip, text, {12, text_y}, color, scale, scale > 0.7 ? 2 : 1);
+        text_y += static_cast<int>(46 * scale);
+      };
+      auto opt_deg = [](const std::optional<double> & v) {
+        return v ? fmt::format("{:+.2f}", *v) : std::string("--");
+      };
+      const cv::Scalar white{255, 255, 255}, gray{150, 150, 150}, yellow{0, 255, 255},
+        green{0, 255, 0}, orange{0, 165, 255};
+
+      line(
+        fmt::format("frame {}  fps {:.0f}  {}  {}", frame_count, fps, io::MODES[mode], aim_mode),
+        yellow);
+
+      // 下发给电控的差值（度）：yaw 右转为正，pitch 抬头为正
+      const cv::Scalar send_color = command.shoot ? orange : (command.control ? green : gray);
+      line(fmt::format("SEND d_yaw {:+.2f}  d_pitch {:+.2f}", command.yaw, command.pitch), send_color, 0.85);
+      line(fmt::format("     control {}  shoot {}", command.control ? 1 : 0, command.shoot ? 1 : 0), send_color, 0.85);
+
+      // IMU 云台姿态（世界系，pitch 抬头为正）
+      line(
+        fmt::format(
+          "IMU   yaw {:+.2f}  pitch {:+.2f}  roll {:+.2f}", ypr[0] * rad2deg, -ypr[1] * rad2deg,
+          ypr[2] * rad2deg),
+        white);
+
+      line(
+        fmt::format(
+          "Track [{}]  armors {}/{}  targets {}", tracker.state(), armors_raw, armors_after_color,
+          targets.size()),
+        white);
+      if (!targets.empty()) {
+        const auto & target = targets.front();
+        const Eigen::VectorXd x = target.ekf_x();
+        line(
+          fmt::format(
+            "Target {} {}  id {}  dist {:.2f} m", auto_aim::ARMOR_NAMES[target.name],
+            auto_aim::ARMOR_TYPES[target.armor_type], target.last_id, std::hypot(x[0], x[2], x[4])),
+          white);
+        const char * gyro =
+          aimer.debug_small_gyro_active ? "ON" : (aimer.debug_small_gyro_detected ? "YES" : "NO");
+        line(fmt::format("  w {:+.2f} rad/s  r {:.2f}  gyro {}", x[7], x[8], gyro), white);
       } else {
-        tools::draw_text(vis, "  (no target)", {10, y0}, {150, 150, 150}, 0.6);
-        y0 += line_h;
+        line("Target --", gray);
       }
-      // ----- 火控：control=aim 成功；shoot=control 且 Shooter 判定可开火（见下方说明） -----
-      tools::draw_text(vis, "Fire control:", {10, y0}, {0, 255, 255}, 0.7);
-      y0 += line_h;
-      tools::draw_text(vis, fmt::format("  bullet_speed: {:.1f}  mode: {}", cboard.bullet_speed, io::MODES[mode]), {10, y0}, {255, 255, 255}, 0.6);
-      y0 += line_h;
-      tools::draw_text(vis, fmt::format("  control:{} shoot:{}", command.control ? 1 : 0, command.shoot ? 1 : 0), {10, y0}, {255, 255, 255}, 0.6);
-      y0 += line_h;
-      tools::draw_text(
-        vis, fmt::format("  cmd yaw:{:.2f}  pitch:{:.2f}", command.yaw, command.pitch),
-        {10, y0},
-        targets.empty() ? cv::Scalar(150, 150, 150) : cv::Scalar(255, 255, 255), 0.6);
-      if (targets.empty() && armors_raw > 0) {
-        tools::draw_text(vis, "  (no target -> fire control idle)", {10, y0 + line_h}, {0, 200, 255}, 0.55);
-        y0 += line_h;
+
+      if (aim_world.control) {
+        line(
+          fmt::format(
+            "Aim   yaw {:+.2f}  pitch {:+.2f} (world)", aim_world.yaw * rad2deg,
+            aim_world.pitch * rad2deg),
+          white);
+        // Aimer 在弹速 < 14 m/s（没有电控回传）时按 20 m/s 解弹道
+        const bool default_speed = cboard.bullet_speed < 14;
+        line(
+          fmt::format(
+            "  fly {:.0f} ms  predict {:.0f} ms  v {:.1f}{}", aimer.debug_fly_time * 1e3,
+            aimer.debug_total_predict_time * 1e3, default_speed ? 20.0 : cboard.bullet_speed,
+            default_speed ? " default" : ""),
+          default_speed ? orange : white);
       }
-      y0 += line_h;
-      if (draw_armors.empty()) {
-        tools::draw_text(
-          vis, "no det: check enemy_color/min_confidence or aim at armor", {10, y0 + line_h},
-          {0, 165, 255}, 0.55);
+
+      if (aimer.debug_small_gyro_active) {
+        const bool open = shooter.debug_small_gyro_fire_window;
+        line(
+          fmt::format(
+            "Fire  gyro window {}  yaw_err {}", open ? "OPEN" : "CLOSE",
+            opt_deg(shooter.debug_small_gyro_yaw_error_deg)),
+          open ? green : orange);
+      } else {
+        const bool ok = shooter.debug_hit_window_ok;
+        line(
+          fmt::format(
+            "Fire  hit {}  err y {} p {}  streak {}", ok ? "OK" : "NO",
+            opt_deg(shooter.debug_hit_yaw_error_deg), opt_deg(shooter.debug_hit_pitch_error_deg),
+            shooter.debug_fire_ready_streak),
+          ok ? green : white);
       }
+
+      if (pred_ypd && det_ypd) {
+        line(
+          fmt::format(
+            "Pred  err yaw {:+.2f}  pitch {:+.2f}",
+            tools::limit_rad((*pred_ypd)[0] - (*det_ypd)[0]) * rad2deg,
+            ((*pred_ypd)[1] - (*det_ypd)[1]) * rad2deg),
+          white);
+      }
+
+      // 有绿框但跟踪器不触发：enemy_color 过滤掉了所有检测
+      if (armors_raw > 0 && armors_after_color == 0 && !draw_armors.empty()) {
+        const auto & first = draw_armors.front();
+        const std::string det_color = first.color <= auto_aim::Color::purple
+                                        ? auto_aim::COLORS[static_cast<size_t>(first.color)]
+                                        : "?";
+        line(fmt::format(">> set enemy_color to \"{}\"", det_color), orange);
+      } else if (draw_armors.empty()) {
+        line("no det: check enemy_color / min_confidence", orange);
+      }
+
+      const int plot_w = vis.cols - text_w;
+      yaw_plot.draw(strip, {text_w, 0, plot_w, strip_h / 2});
+      pitch_plot.draw(strip, {text_w, strip_h / 2, plot_w, strip_h / 2});
 
       // 检测框：用与 detection 窗口同一份 armors 画，保证两边一致
       int vis_w = vis.cols, vis_h = vis.rows;
@@ -461,9 +556,10 @@ int main(int argc, char * argv[])
           }
         }
       }
-      cv::namedWindow("auto_aim", cv::WINDOW_NORMAL);
-      cv::resizeWindow("auto_aim", 800, 600);
-      cv::imshow("auto_aim", vis);
+      cv::Mat canvas;
+      cv::vconcat(vis, strip, canvas);
+      if (frame_count == 1) cv::resizeWindow("auto_aim", 900, 900 * canvas.rows / canvas.cols);
+      cv::imshow("auto_aim", canvas);
       if (cv::waitKey(1) == 'q') break;
     }
   }

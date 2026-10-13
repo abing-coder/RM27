@@ -4,6 +4,7 @@
 //   - 四块装甲板（绿色立方体）、旋转中心（青色球）、旋转轨迹（黄色圆环）
 //   - 火控选中的瞄准点：红色立方体（control 有效），开火时变橙色
 //   - 自身位姿：以 TF (world -> gimbal) 广播，rviz2 中以坐标轴显示
+//   - 相机 (gimbal -> camera) 与虚拟枪口 (gimbal -> barrel)，枪口另画一条品红射线
 //
 // 用法（已 source /opt/ros/<distro>/setup.bash）:
 //   ./build/rviz_bridge
@@ -73,6 +74,9 @@ const ColorRGBA YELLOW = rgba(1.0f, 1.0f, 0.0f, 0.6f);
 const ColorRGBA WHITE = rgba(1.0f, 1.0f, 1.0f, 0.9f);
 const ColorRGBA RED = rgba(1.0f, 0.0f, 0.0f, 0.95f);
 const ColorRGBA ORANGE = rgba(1.0f, 0.6f, 0.0f, 0.95f);
+const ColorRGBA MAGENTA = rgba(1.0f, 0.0f, 1.0f, 0.9f);
+
+constexpr double BARREL_RAY_LENGTH = 6.0;  // m
 
 Point make_point(double x, double y, double z)
 {
@@ -165,34 +169,45 @@ private:
     if (!msg.is_object()) return;
 
     auto now = get_clock()->now();
-    if (msg.contains("self")) broadcast_self_tf(msg["self"], now);
+    // world 原点即云台旋转中心；camera、barrel 挂在 gimbal 下
+    if (msg.contains("self")) broadcast_tf(FRAME_ID, "gimbal", msg["self"], now);
+    if (msg.contains("camera")) broadcast_tf("gimbal", "camera", msg["camera"], now);
+    const bool has_barrel = msg.contains("barrel") && broadcast_tf("gimbal", "barrel", msg["barrel"], now);
     static const nlohmann::json empty_targets = nlohmann::json::array();
     const nlohmann::json & targets = msg.contains("targets") ? msg["targets"] : empty_targets;
     const nlohmann::json * aim = msg.contains("aim") && !msg["aim"].is_null() ? &msg["aim"] : nullptr;
-    publish_markers(targets, aim, now);
+    publish_markers(targets, aim, has_barrel, now);
   }
 
-  // 自身位姿：world 原点即机器人位置，姿态为云台四元数
-  void broadcast_self_tf(const nlohmann::json & self_pose, const rclcpp::Time & now)
+  // pose: {"q": [x, y, z, w], "t": [x, y, z]}，t 可省略
+  bool broadcast_tf(
+    const std::string & parent, const std::string & child, const nlohmann::json & pose,
+    const rclcpp::Time & now)
   {
-    if (self_pose.is_null() || !self_pose.contains("q") || !self_pose["q"].is_array() ||
-        self_pose["q"].size() < 4)
-      return;
-    const auto & q = self_pose["q"];
+    if (!pose.is_object() || !pose.contains("q") || !pose["q"].is_array() || pose["q"].size() < 4)
+      return false;
+    const auto & q = pose["q"];
 
     geometry_msgs::msg::TransformStamped tf;
     tf.header.stamp = now;
-    tf.header.frame_id = FRAME_ID;
-    tf.child_frame_id = "gimbal";
+    tf.header.frame_id = parent;
+    tf.child_frame_id = child;
+    if (pose.contains("t") && pose["t"].is_array() && pose["t"].size() >= 3) {
+      tf.transform.translation.x = pose["t"][0].get<double>();
+      tf.transform.translation.y = pose["t"][1].get<double>();
+      tf.transform.translation.z = pose["t"][2].get<double>();
+    }
     tf.transform.rotation.x = q[0].get<double>();
     tf.transform.rotation.y = q[1].get<double>();
     tf.transform.rotation.z = q[2].get<double>();
     tf.transform.rotation.w = q[3].get<double>();
     tf_broadcaster_->sendTransform(tf);
+    return true;
   }
 
   void publish_markers(
-    const nlohmann::json & targets, const nlohmann::json * aim, const rclcpp::Time & now)
+    const nlohmann::json & targets, const nlohmann::json * aim, bool has_barrel,
+    const rclcpp::Time & now)
   {
     MarkerArray arr;
 
@@ -308,6 +323,17 @@ private:
       m.color = color;
       m.points.push_back(make_point(0.0, 0.0, 0.0));
       m.points.push_back(make_point(x, y, z));
+      arr.markers.push_back(m);
+    }
+
+    // 虚拟枪口指向：沿 barrel 的 X 轴画长射线，补偿角只有一两度，坐标轴本身看不出差别
+    if (has_barrel) {
+      Marker m = new_marker(Marker::LINE_STRIP);
+      m.header.frame_id = "barrel";
+      m.scale.x = 0.006;
+      m.color = MAGENTA;
+      m.points.push_back(make_point(0.0, 0.0, 0.0));
+      m.points.push_back(make_point(BARREL_RAY_LENGTH, 0.0, 0.0));
       arr.markers.push_back(m);
     }
 
