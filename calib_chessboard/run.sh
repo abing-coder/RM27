@@ -1,42 +1,47 @@
 #!/usr/bin/env bash
-# 棋盘格一键标定：编译并运行 calib_chessboard
+# 棋盘格标定。内参和手眼分开跑，采集目录互不影响。
 # 用法:
-#   ./calib_chessboard/run.sh
-#   ./calib_chessboard/run.sh /path/to/config.yaml
-#   ./calib_chessboard/run.sh clean          # 清空采集图，保留结果 yaml
-#   ./calib_chessboard/run.sh clean-all      # 采集图 + 标定结果都删
-#   SKIP_BUILD=1 ./calib_chessboard/run.sh
+#   ./calib_chessboard/run.sh intra     # 只标内参：移动棋盘，不读 IMU
+#   ./calib_chessboard/run.sh hand      # 只标手眼：固定棋盘，转动云台，读 USB IMU
+#   ./calib_chessboard/run.sh clean intra
+#   ./calib_chessboard/run.sh clean hand
+#   SKIP_BUILD=1 ./calib_chessboard/run.sh intra
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$DIR/.." && pwd)"
 
-clean_data() {
-  local n
-  n="$(find "$DIR/data" -type f \( -name '*.jpg' -o -name '*.txt' -o -name 'capture_info.yaml' \) 2>/dev/null | wc -l)"
-  rm -f "$DIR/data"/*.jpg "$DIR/data"/*.txt "$DIR/data/capture_info.yaml"
-  echo "已清空采集数据 $DIR/data/（$n 个文件）"
+data_dir_of() {
+  case "$1" in
+    intra) echo "$DIR/data_intrinsics" ;;
+    hand) echo "$DIR/data_handeye" ;;
+    *) echo "未知模式: $1（只能是 intra 或 hand）" >&2; return 1 ;;
+  esac
 }
 
+clean_data() {
+  local dir n
+  dir="$(data_dir_of "$1")"
+  n="$(find "$dir" -type f \( -name '*.jpg' -o -name '*.txt' -o -name 'capture_info.yaml' \) 2>/dev/null | wc -l)"
+  rm -f "$dir"/*.jpg "$dir"/*.txt "$dir/capture_info.yaml"
+  echo "已清空 $dir（$n 个文件）"
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "" ]]; then
+  echo "内参: ./calib_chessboard/run.sh intra"
+  echo "手眼: ./calib_chessboard/run.sh hand"
+  echo "清空: ./calib_chessboard/run.sh clean intra|hand"
+  exit 0
+fi
+
 if [[ "${1:-}" == "clean" ]]; then
-  clean_data
-  echo "结果仍在 $DIR/output/result.yaml ；重采请再跑 ./calib_chessboard/run.sh"
+  clean_data "${2:-}"
   exit 0
 fi
 
-if [[ "${1:-}" == "clean-all" ]]; then
-  clean_data
-  rm -f "$DIR/output/result.yaml"
-  echo "已删除 $DIR/output/result.yaml"
-  exit 0
-fi
-
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "用法: $0 [config.yaml | clean | clean-all]"
-  exit 0
-fi
-
-CONFIG="${1:-$DIR/config.yaml}"
+MODE="$1"
+data_dir_of "$MODE" >/dev/null
+CONFIG="${2:-$DIR/config.yaml}"
 
 if [[ "$CONFIG" != /* ]]; then
   CONFIG="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
@@ -44,7 +49,6 @@ fi
 
 if [[ ! -f "$CONFIG" ]]; then
   echo "找不到配置: $CONFIG"
-  echo "请先编辑 $DIR/config.yaml（棋盘格内角点、格距、use_imu）"
   exit 1
 fi
 
@@ -65,5 +69,5 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
-echo "==> 运行: $BIN $CONFIG"
-exec "$BIN" "$CONFIG"
+echo "==> 运行: $BIN $CONFIG --mode=$MODE"
+exec "$BIN" "$CONFIG" --mode="$MODE"

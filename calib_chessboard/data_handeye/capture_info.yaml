@@ -1,0 +1,4 @@
+inner_corners_cols: 7
+inner_corners_rows: 7
+square_size_mm: 20
+use_imu: true

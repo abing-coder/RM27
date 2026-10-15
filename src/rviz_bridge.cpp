@@ -3,6 +3,7 @@
 // 接收 standard.cpp 通过 UDP(9871) 发来的整车估计与火控状态：
 //   - 四块装甲板（绿色立方体）、旋转中心（青色球）、旋转轨迹（黄色圆环）
 //   - 火控选中的瞄准点：红色立方体（control 有效），开火时变橙色
+//   - 弹道：浅蓝曲线，从云台中心按无空气阻力模型落到瞄准点（与 tools::Trajectory 同一公式）
 //   - 自身位姿：以 TF (world -> gimbal) 广播，rviz2 中以坐标轴显示
 //   - 相机 (gimbal -> camera) 与虚拟枪口 (gimbal -> barrel)，枪口另画一条品红射线
 //
@@ -75,6 +76,7 @@ const ColorRGBA WHITE = rgba(1.0f, 1.0f, 1.0f, 0.9f);
 const ColorRGBA RED = rgba(1.0f, 0.0f, 0.0f, 0.95f);
 const ColorRGBA ORANGE = rgba(1.0f, 0.6f, 0.0f, 0.95f);
 const ColorRGBA MAGENTA = rgba(1.0f, 0.0f, 1.0f, 0.9f);
+const ColorRGBA SKY = rgba(0.45f, 0.85f, 1.0f, 0.95f);
 
 constexpr double BARREL_RAY_LENGTH = 6.0;  // m
 
@@ -114,6 +116,8 @@ class RvizBridge : public rclcpp::Node
 public:
   RvizBridge() : Node("auto_aim_rviz_bridge")
   {
+    // 仅显示用：gimbal 及所有标记整体上抬，避免和 world 坐标轴重叠（不影响主程序）
+    lift_ = declare_parameter("view_lift", 0.3);
     pub_ = create_publisher<MarkerArray>("/auto_aim/markers", 10);
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
@@ -138,7 +142,7 @@ public:
     ::fcntl(socket_, F_SETFL, flags | O_NONBLOCK);
 
     timer_ = create_wall_timer(std::chrono::milliseconds(10), std::bind(&RvizBridge::poll, this));
-    RCLCPP_INFO(get_logger(), "listening on udp://%s:%u", UDP_HOST, UDP_PORT);
+    RCLCPP_INFO(get_logger(), "listening on udp://%s:%u, view_lift=%.2f m", UDP_HOST, UDP_PORT, lift_);
   }
 
   ~RvizBridge() override
@@ -170,7 +174,7 @@ private:
 
     auto now = get_clock()->now();
     // world 原点即云台旋转中心；camera、barrel 挂在 gimbal 下
-    if (msg.contains("self")) broadcast_tf(FRAME_ID, "gimbal", msg["self"], now);
+    if (msg.contains("self")) broadcast_tf(FRAME_ID, "gimbal", msg["self"], now, lift_);
     if (msg.contains("camera")) broadcast_tf("gimbal", "camera", msg["camera"], now);
     const bool has_barrel = msg.contains("barrel") && broadcast_tf("gimbal", "barrel", msg["barrel"], now);
     static const nlohmann::json empty_targets = nlohmann::json::array();
@@ -182,7 +186,7 @@ private:
   // pose: {"q": [x, y, z, w], "t": [x, y, z]}，t 可省略
   bool broadcast_tf(
     const std::string & parent, const std::string & child, const nlohmann::json & pose,
-    const rclcpp::Time & now)
+    const rclcpp::Time & now, double lift_z = 0.0)
   {
     if (!pose.is_object() || !pose.contains("q") || !pose["q"].is_array() || pose["q"].size() < 4)
       return false;
@@ -197,6 +201,7 @@ private:
       tf.transform.translation.y = pose["t"][1].get<double>();
       tf.transform.translation.z = pose["t"][2].get<double>();
     }
+    tf.transform.translation.z += lift_z;
     tf.transform.rotation.x = q[0].get<double>();
     tf.transform.rotation.y = q[1].get<double>();
     tf.transform.rotation.z = q[2].get<double>();
@@ -236,7 +241,7 @@ private:
       Marker m = new_marker(Marker::CUBE);
       m.pose.position.x = x;
       m.pose.position.y = y;
-      m.pose.position.z = z;
+      m.pose.position.z = z + lift_;
       m.pose.orientation.z = std::sin(a / 2.0);
       m.pose.orientation.w = std::cos(a / 2.0);
       m.scale.x = size.x * scale;
@@ -254,7 +259,7 @@ private:
         if (!center.is_array() || center.size() < 3) continue;
         const double cx = center[0].get<double>();
         const double cy = center[1].get<double>();
-        const double cz = center[2].get<double>();
+        const double cz = center[2].get<double>() + lift_;
         const double radius = target["radius"].get<double>();
         const Size3 & size = armor_size_of(target, "armor_type");
 
@@ -317,13 +322,43 @@ private:
       const ColorRGBA & color = bool_or(*aim, "shoot", false) ? ORANGE : RED;
       add_armor_cube(x, y, z, a, size, color, 1.15);
 
-      // 自身到瞄准点的射击线
+      // 自身到瞄准点的直线
       Marker m = new_marker(Marker::LINE_STRIP);
       m.scale.x = 0.004;
       m.color = color;
-      m.points.push_back(make_point(0.0, 0.0, 0.0));
-      m.points.push_back(make_point(x, y, z));
+      m.points.push_back(make_point(0.0, 0.0, lift_));
+      m.points.push_back(make_point(x, y, z + lift_));
       arr.markers.push_back(m);
+
+      // 弹道：与 tools::Trajectory 相同的无阻力模型，g = 9.7833
+      double speed = 22.0;
+      if (aim->contains("speed") && (*aim)["speed"].is_number()) speed = (*aim)["speed"].get<double>();
+      const double d = std::hypot(x, y);
+      constexpr double g = 9.7833;
+      if (d > 1e-3 && speed > 1.0) {
+        const double a = g * d * d / (2 * speed * speed);
+        const double delta = d * d - 4 * a * (a + z);
+        if (delta >= 0 && a > 1e-9) {
+          const double root = std::sqrt(delta);
+          const double pitch1 = std::atan((d + root) / (2 * a));
+          const double pitch2 = std::atan((d - root) / (2 * a));
+          const double t1 = d / (speed * std::cos(pitch1));
+          const double t2 = d / (speed * std::cos(pitch2));
+          const double pitch = t1 < t2 ? pitch1 : pitch2;
+          const double fly = t1 < t2 ? t1 : t2;
+          Marker arc = new_marker(Marker::LINE_STRIP);
+          arc.scale.x = 0.012;
+          arc.color = SKY;
+          constexpr int n = 32;
+          for (int i = 0; i <= n; ++i) {
+            const double t = fly * static_cast<double>(i) / n;
+            const double s = speed * std::cos(pitch) * t;
+            const double zz = speed * std::sin(pitch) * t - 0.5 * g * t * t;
+            arc.points.push_back(make_point(x / d * s, y / d * s, zz + lift_));
+          }
+          arr.markers.push_back(arc);
+        }
+      }
     }
 
     // 虚拟枪口指向：沿 barrel 的 X 轴画长射线，补偿角只有一两度，坐标轴本身看不出差别
@@ -344,6 +379,7 @@ private:
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::TimerBase::SharedPtr timer_;
   int socket_ = -1;
+  double lift_ = 0.0;
   std::array<char, 65535> buffer_{};
 };
 

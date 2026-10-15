@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "io/camera.hpp"
-#include "io/cboard.hpp"
+#include "io/dm_imu/dm_imu.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
@@ -30,6 +30,7 @@ using Clock = std::chrono::steady_clock;
 
 const std::string keys =
   "{help h usage ? |                                | 输出命令行参数说明}"
+  "{mode           |                                | intra=只标内参  hand=只标手眼}"
   "{@config-path   | calib_chessboard/config.yaml   | yaml 配置文件路径 }";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ struct Config
   bool do_intrinsics = true;
   bool do_handeye = true;
   bool use_imu = false;
+  std::string imu_port = "/dev/ttyACM0";
 
   int cols = 8;
   int rows = 5;
@@ -61,6 +63,9 @@ struct Config
 
   bool fix_k3 = true;
   std::string handeye_method = "tsai";
+  double handeye_max_mismatch_deg = 1.5;
+  double handeye_still_s = 0.5;
+  double handeye_still_deg = 0.2;
 
   std::string camera_name = "opencv";
   int opencv_device = 0;
@@ -87,6 +92,7 @@ Config load_config(const std::string & path)
   c.do_intrinsics = yaml_get(steps, "intrinsics", true);
   c.do_handeye = yaml_get(steps, "handeye", true);
   c.use_imu = yaml_get(yaml, "use_imu", false);
+  c.imu_port = yaml_get(yaml, "dm_imu_port", std::string("/dev/ttyACM0"));
 
   auto board = yaml["chessboard"];
   c.cols = yaml_get(board, "inner_corners_cols", 8);
@@ -110,6 +116,9 @@ Config load_config(const std::string & path)
   auto calib = yaml["calib"];
   c.fix_k3 = yaml_get(calib, "fix_k3", true);
   c.handeye_method = yaml_get(calib, "handeye_method", std::string("tsai"));
+  c.handeye_max_mismatch_deg = yaml_get(calib, "handeye_max_mismatch_deg", 1.5);
+  c.handeye_still_s = yaml_get(cap, "handeye_still_s", 0.5);
+  c.handeye_still_deg = yaml_get(cap, "handeye_still_deg", 0.2);
 
   c.camera_name = yaml_get(yaml, "camera_name", std::string("opencv"));
   c.opencv_device = yaml_get(yaml, "opencv_device", 0);
@@ -120,8 +129,6 @@ Config load_config(const std::string & path)
     c.R_gimbal2imubody = yaml["R_gimbal2imubody"].as<std::vector<double>>();
   if (c.R_gimbal2imubody.size() != 9)
     throw std::runtime_error("R_gimbal2imubody 必须是 9 个数（行优先 3x3）");
-
-  if (yaml["can_disabled"] && yaml["can_disabled"].as<bool>()) c.use_imu = false;
 
   return c;
 }
@@ -329,11 +336,92 @@ struct ProgressBoard
   std::string hint;
   std::optional<Eigen::Vector3d> ypr_deg;
 
+  bool hand_mode = false;
+  // 手眼：以第一张为中心的 3x3 目标姿态，坐标为 (向右, 向上) 度
+  static constexpr double kYawStep = 8;
+  static constexpr double kPitchStep = 5;
+  static constexpr double kTol = 2.5;
+  static constexpr int kTargets = 9;
+  static constexpr int kTargetsNeed = 7;
+  std::vector<Eigen::Vector2d> gimbal_yp;
+  std::optional<Eigen::Vector2d> center;
+  std::array<bool, kTargets> filled{};
+  int n_filled = 0;
+
+  static Eigen::Vector2d target(int i)
+  {
+    return {(i % 3 - 1) * kYawStep, (1 - i / 3) * kPitchStep};
+  }
+
+  // yaw 左正、pitch 下正 -> 向右、向上为正
+  Eigen::Vector2d to_view(double yaw, double pitch) const
+  {
+    return {-std::remainder(yaw - center->x(), 360.0), -(pitch - center->y())};
+  }
+
+  int nearest_open(const Eigen::Vector2d & v) const
+  {
+    int best = -1;
+    for (int i = 0; i < kTargets; ++i) {
+      if (filled[i]) continue;
+      if (best < 0 || (target(i) - v).norm() < (target(best) - v).norm()) best = i;
+    }
+    return best;
+  }
+
+  bool on_open_target() const
+  {
+    if (!center) return true;
+    if (!ypr_deg) return false;
+    const auto v = to_view((*ypr_deg)[0], (*ypr_deg)[1]);
+    const int i = nearest_open(v);
+    return i >= 0 && (target(i) - v).norm() < kTol;
+  }
+
+  std::string hand_hint(bool board_found) const
+  {
+    if (!ypr_deg) return "Waiting for USB IMU";
+    if (!board_found) return "Keep the board fixed and inside the image";
+    if (!center) return "Aim at board center, hold still";
+    const auto v = to_view((*ypr_deg)[0], (*ypr_deg)[1]);
+    const int i = nearest_open(v);
+    if (i < 0) return "All targets done, press C";
+    const Eigen::Vector2d d = target(i) - v;
+    if (d.norm() < kTol) return "HOLD STILL...";
+    return fmt::format(
+      "{} {:.0f}  {} {:.0f} deg{}", d.x() > 0 ? "RIGHT" : "LEFT", std::abs(d.x()),
+      d.y() > 0 ? "UP" : "DOWN", std::abs(d.y()), goodenough ? "  (or C)" : "");
+  }
+
   void pull(const RosSampler & sp)
   {
     samples = sp.db;
+    if (hand_mode) return;
     saved = static_cast<int>(sp.db.size());
     sp.stats(lo, hi, prog, goodenough);
+  }
+
+  void add_gimbal(double yaw_deg, double pitch_deg)
+  {
+    gimbal_yp.emplace_back(yaw_deg, pitch_deg);
+    saved = static_cast<int>(gimbal_yp.size());
+    refresh_gimbal();
+  }
+
+  void refresh_gimbal()
+  {
+    filled.fill(false);
+    n_filled = 0;
+    goodenough = false;
+    if (gimbal_yp.empty()) return;
+    center = gimbal_yp.front();
+    for (int i = 0; i < kTargets; ++i) {
+      for (const auto & yp : gimbal_yp) {
+        if ((target(i) - to_view(yp.x(), yp.y())).norm() < kTol) filled[i] = true;
+      }
+      n_filled += filled[i];
+    }
+    goodenough = n_filled >= kTargetsNeed;
   }
 
   cv::Mat render(int height) const;
@@ -418,7 +506,7 @@ cv::Mat ProgressBoard::render(int height) const
   const int h = std::max(height, 680);
   cv::Mat p(h, w, CV_8UC3, cv::Scalar(28, 28, 32));
   int y = 34;
-  put(p, "ROS-style coverage", {18, y}, {240, 240, 240}, 0.8, 2);
+  put(p, hand_mode ? "hand-eye: gimbal motion" : "ROS-style coverage", {18, y}, {240, 240, 240}, 0.8, 2);
   y += 16;
   cv::line(p, {18, y}, {w - 18, y}, {70, 70, 80}, 1);
   y += 30;
@@ -445,6 +533,22 @@ cv::Mat ProgressBoard::render(int height) const
   }
 
   y += 10;
+  if (hand_mode) {
+    put(p, "gimbal targets   (board stays fixed)", {18, y}, {180, 180, 180}, 0.48, 1);
+    y += 22;
+    const double frac = static_cast<double>(n_filled) / kTargetsNeed;
+    const cv::Scalar col = goodenough ? cv::Scalar(40, 210, 80)
+                                      : cv::Scalar(0, static_cast<int>(std::min(frac, 1.0) * 255), 255);
+    put(p, "Poses", {18, y + 14}, col, 0.55, 2);
+    draw_bar(p, {90, y + 4, 300, 16}, frac, col);
+    put(p, fmt::format("{}/{}", n_filled, kTargetsNeed), {400, y + 16}, col, 0.45, 1);
+    y += 24;
+    put(p, "move yellow circle into a gray box, stop, wait beep", {18, y}, {140, 140, 145}, 0.42, 1);
+    y += 22;
+    put(p, fmt::format("box step: yaw {:.0f} / pitch {:.0f} deg", kYawStep, kPitchStep), {18, y},
+        {140, 140, 145}, 0.42, 1);
+    y += 46;
+  } else {
   put(p, "X / Y / Size / Skew   (fill until GREEN)", {18, y}, {180, 180, 180}, 0.48, 1);
   y += 18;
 
@@ -471,6 +575,7 @@ cv::Mat ProgressBoard::render(int height) const
     put(p, kParamHow[i], {track_x, y}, {140, 140, 145}, 0.42, 1);
     y += 22;
   }
+  }
 
   y += 4;
   const cv::Rect next_box{18, y, w - 36, 88};
@@ -481,17 +586,42 @@ cv::Mat ProgressBoard::render(int height) const
   put(p, hint, {28, y + 58}, {0, 255, 255}, 0.58, 2);
   y += 104;
 
-  put(p, "sample map  (X-Y)", {18, y}, {180, 180, 180}, 0.45, 1);
+  put(p, hand_mode ? "sample map  (yaw-pitch)" : "sample map  (X-Y)", {18, y}, {180, 180, 180}, 0.45, 1);
   y += 8;
   const cv::Rect map{18, y, 220, 150};
   cv::rectangle(p, map, {40, 40, 45}, -1);
   cv::rectangle(p, map, {100, 100, 110}, 1);
   for (const auto & s : samples) {
+    if (hand_mode) break;
     const cv::Point pt(
       map.x + static_cast<int>(s[0] * map.width), map.y + static_cast<int>(s[1] * map.height));
     cv::circle(p, pt, 4, {40, 180, 80}, -1);
   }
-  if (live_ok) {
+  if (hand_mode && center) {
+    const double rx = kYawStep * 1.6, ry = kPitchStep * 1.6;
+    auto place = [&](const Eigen::Vector2d & v) {
+      const double nx = std::clamp((v.x() + rx) / (2 * rx), 0.0, 1.0);
+      const double ny = std::clamp((ry - v.y()) / (2 * ry), 0.0, 1.0);
+      return cv::Point(
+        map.x + static_cast<int>(nx * map.width), map.y + static_cast<int>(ny * map.height));
+    };
+    const int bw = static_cast<int>(kTol / rx * map.width);
+    const int bh = static_cast<int>(kTol / ry * map.height);
+    for (int i = 0; i < kTargets; ++i) {
+      const cv::Point c = place(target(i));
+      cv::rectangle(
+        p, {c.x - bw, c.y - bh}, {c.x + bw, c.y + bh},
+        filled[i] ? cv::Scalar(40, 180, 80) : cv::Scalar(130, 130, 130), filled[i] ? -1 : 1);
+    }
+    for (const auto & yp : gimbal_yp) cv::circle(p, place(to_view(yp.x(), yp.y())), 3, {255, 255, 255}, -1);
+    if (ypr_deg) {
+      const auto v = to_view((*ypr_deg)[0], (*ypr_deg)[1]);
+      const int i = nearest_open(v);
+      if (i >= 0) cv::arrowedLine(p, place(v), place(target(i)), {0, 220, 255}, 1, cv::LINE_AA, 0, 0.15);
+      cv::circle(p, place(v), 6, {0, 220, 255}, 2);
+    }
+  }
+  if (!hand_mode && live_ok) {
     const cv::Point pt(
       map.x + static_cast<int>(live[0] * map.width),
       map.y + static_cast<int>(live[1] * map.height));
@@ -511,7 +641,7 @@ cv::Mat ProgressBoard::render(int height) const
   put(p, goodenough ? "CALIBRATE" : "NOT READY",
       cv::Point(calib_btn.x + 18, calib_btn.y + 36),
       goodenough ? cv::Scalar(255, 255, 255) : cv::Scalar(150, 150, 150), 0.7, 2);
-  put(p, goodenough ? "press C once" : "keep moving",
+  put(p, goodenough ? "press C once" : (hand_mode ? "turn gimbal" : "keep moving"),
       cv::Point(calib_btn.x + 18, calib_btn.y + 78), cv::Scalar(180, 180, 180), 0.45, 1);
 
   y += 160;
@@ -619,7 +749,7 @@ Eigen::Matrix3d gimbal2world(const Eigen::Quaterniond & q, const Config & c)
 {
   Eigen::Matrix<double, 3, 3, Eigen::RowMajor> R_g2imu(c.R_gimbal2imubody.data());
   Eigen::Matrix3d R_imu = q.normalized().toRotationMatrix();
-  return R_g2imu.transpose() * R_imu * R_g2imu;
+  return R_imu * R_g2imu;
 }
 
 struct FrameGrabber
@@ -683,7 +813,7 @@ void write_capture_info(const Config & c)
   f << out.c_str() << "\n";
 }
 
-int capture_loop(const Config & c, io::CBoard * cboard, ProgressBoard & pb)
+int capture_loop(const Config & c, io::DM_IMU * imu, ProgressBoard & pb)
 {
   FrameGrabber grabber;
   if (!open_grabber(grabber, c)) return -1;
@@ -706,15 +836,27 @@ int capture_loop(const Config & c, io::CBoard * cboard, ProgressBoard & pb)
 
   pb.capture = StepState::Run;
   pb.need = c.min_frames;
-  pb.imu = cboard != nullptr;
+  pb.imu = imu != nullptr;
+  pb.hand_mode = imu != nullptr;
+  if (pb.hand_mode) {
+    for (int i = 1; i < next; ++i) {
+      auto qpath = fs::path(c.data_dir) / fmt::format("{}.txt", i);
+      if (!fs::exists(qpath)) continue;
+      Eigen::Vector3d ypr = tools::eulers(gimbal2world(read_q(qpath), c), 2, 1, 0) * 57.3;
+      pb.add_gimbal(ypr[0], ypr[1]);
+    }
+  }
   pb.pull(sampler);
-  pb.hint = next_action(false, sampler, pb.lo, pb.hi, pb.prog, pb.goodenough);
+  pb.hint = pb.hand_mode ? pb.hand_hint(false) : next_action(false, sampler, pb.lo, pb.hi, pb.prog, pb.goodenough);
 
   tools::logger()->info(
-    "像 ROS 标定那样移动棋盘：条变绿就够了。自动收图，C=开始计算，S=强制保存，Q=结束。已有 {} 张",
-    sampler.db.size());
+    pb.hand_mode ? "手眼：棋盘固定，按提示把黄圈转进灰框后停住，自动收图。C=计算，S=强制保存，Q=结束。已有 {} 张"
+                 : "内参：移动棋盘直到条变绿。自动收图，C=计算，S=强制保存，Q=结束。已有 {} 张",
+    pb.hand_mode ? pb.gimbal_yp.size() : sampler.db.size());
 
   cv::namedWindow(kCalibWin, cv::WINDOW_NORMAL);
+  std::optional<Eigen::Vector3d> prev_ypr;
+  Clock::time_point still_since = Clock::now();
 
   while (true) {
     cv::Mat img;
@@ -730,11 +872,16 @@ int capture_loop(const Config & c, io::CBoard * cboard, ProgressBoard & pb)
 
     std::optional<Eigen::Vector3d> ypr;
     Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
-    if (cboard) {
-      q = cboard->imu_at(t);
+    if (imu) {
+      q = imu->imu_at(t);
       Eigen::Vector3d ypr_rad = tools::eulers(gimbal2world(q, c), 2, 1, 0);
       ypr = ypr_rad * 57.3;
+      if (!prev_ypr || (*ypr - *prev_ypr).head<2>().cwiseAbs().maxCoeff() > c.handeye_still_deg)
+        still_since = t;
+      prev_ypr = ypr;
     }
+    const bool gimbal_still =
+      !pb.hand_mode || std::chrono::duration<double>(t - still_since).count() >= c.handeye_still_s;
 
     RosParam p{};
     pb.found = found;
@@ -743,7 +890,9 @@ int capture_loop(const Config & c, io::CBoard * cboard, ProgressBoard & pb)
     pb.live_ok = found && ros_params(corners, img.size(), c.cols, c.rows, p);
     if (pb.live_ok) pb.live = p;
     pb.pull(sampler);
-    pb.hint = next_action(found, sampler, pb.lo, pb.hi, pb.prog, pb.goodenough);
+    pb.hint = pb.hand_mode
+                ? pb.hand_hint(found)
+                : next_action(found, sampler, pb.lo, pb.hi, pb.prog, pb.goodenough);
     if (pb.flash > 0) --pb.flash;
 
     auto commit_sample = [&](bool force) {
@@ -752,25 +901,33 @@ int capture_loop(const Config & c, io::CBoard * cboard, ProgressBoard & pb)
         return false;
       }
       if (found && pb.live_ok) {
-        if (!sampler.add_if_new(p, force)) return false;
+        if (!pb.hand_mode && !sampler.add_if_new(p, force)) return false;
+        if (pb.hand_mode && !force && !pb.on_open_target()) return false;
       } else if (!force) {
         return false;
       }
       auto img_path = fs::path(c.data_dir) / fmt::format("{}.jpg", next);
       cv::imwrite(img_path.string(), img);
-      if (cboard) write_q(fs::path(c.data_dir) / fmt::format("{}.txt", next), q);
+      if (imu) write_q(fs::path(c.data_dir) / fmt::format("{}.txt", next), q);
       ++next;
+      if (pb.hand_mode && ypr) pb.add_gimbal((*ypr)[0], (*ypr)[1]);
       pb.pull(sampler);
       pb.flash = 8;
       std::fputc('\a', stdout);
       std::fflush(stdout);
-      tools::logger()->info(
-        "*** Added sample {}, X={:.3f} Y={:.3f} Size={:.3f} Skew={:.3f}  |  {}", sampler.db.size(),
-        pb.live[0], pb.live[1], pb.live[2], pb.live[3], pb.hint);
+      if (pb.hand_mode && ypr) {
+        tools::logger()->info(
+          "*** Added sample {}  yaw {:.1f}  pitch {:.1f}  |  {}", pb.saved, (*ypr)[0], (*ypr)[1],
+          pb.hint);
+      } else {
+        tools::logger()->info(
+          "*** Added sample {}, X={:.3f} Y={:.3f} Size={:.3f} Skew={:.3f}  |  {}", sampler.db.size(),
+          pb.live[0], pb.live[1], pb.live[2], pb.live[3], pb.hint);
+      }
       return true;
     };
 
-    if (c.auto_save && found && pb.live_ok) commit_sample(false);
+    if (c.auto_save && found && pb.live_ok && gimbal_still) commit_sample(false);
 
     cv::Mat vis = img.clone();
     vis = to_bgr(vis);
@@ -783,7 +940,8 @@ int capture_loop(const Config & c, io::CBoard * cboard, ProgressBoard & pb)
     const int key = cv::waitKey(20) & 0xFF;
     if (key == 's' || key == 'S') commit_sample(true);
     if (key == 'c' || key == 'C') {
-      if (pb.goodenough || static_cast<int>(sampler.db.size()) >= std::max(4, c.min_frames)) {
+      const int n_saved = pb.hand_mode ? pb.saved : static_cast<int>(sampler.db.size());
+      if (pb.goodenough || n_saved >= std::max(4, c.min_frames)) {
         tools::logger()->info("收到一次 C，开始自动计算，后面不用再按键");
         break;
       }
@@ -975,6 +1133,7 @@ bool calib_handeye(const Config & c, const Intrinsics & intra, Handeye & out, Pr
   }
 
   std::vector<cv::Mat> R_g2w, t_g2w, rvecs, tvecs;
+  std::vector<int> sample_ids;
   const auto obj = object_points(c);
 
   for (int i = 1;; ++i) {
@@ -1001,11 +1160,49 @@ bool calib_handeye(const Config & c, const Intrinsics & intra, Handeye & out, Pr
     tvec.convertTo(tvec, CV_64F);
     R_cv.convertTo(R_cv, CV_64F);
 
+    sample_ids.push_back(i);
     R_g2w.push_back(R_cv);
     t_g2w.push_back(t_cv);
     rvecs.push_back(rvec);
     tvecs.push_back(tvec);
   }
+
+  // 棋盘不动时，任意两帧的相机相对转角 == 云台相对转角（与外参无关），据此剔除坏样本
+  auto rot_angle = [](const cv::Mat & R) {
+    return std::acos(std::clamp((cv::trace(R)[0] - 1) / 2, -1.0, 1.0)) * 57.3;
+  };
+  std::vector<cv::Mat> R_cam(rvecs.size());
+  for (size_t i = 0; i < rvecs.size(); ++i) cv::Rodrigues(rvecs[i], R_cam[i]);
+  std::vector<size_t> keep(R_g2w.size());
+  for (size_t i = 0; i < keep.size(); ++i) keep[i] = i;
+  while (keep.size() > 5) {
+    size_t worst = 0;
+    double worst_err = 0;
+    for (size_t a = 0; a < keep.size(); ++a) {
+      std::vector<double> errs;
+      for (size_t b = 0; b < keep.size(); ++b) {
+        if (a == b) continue;
+        const size_t i = keep[a], j = keep[b];
+        const double cam = rot_angle(R_cam[i] * R_cam[j].t());
+        const double imu = rot_angle(R_g2w[i].t() * R_g2w[j]);
+        errs.push_back(std::abs(cam - imu));
+      }
+      std::nth_element(errs.begin(), errs.begin() + errs.size() / 2, errs.end());
+      const double med = errs[errs.size() / 2];
+      if (med > worst_err) worst_err = med, worst = a;
+    }
+    if (worst_err < c.handeye_max_mismatch_deg) break;
+    tools::logger()->warn(
+      "剔除样本 {}：相机转角与 IMU 转角相差 {:.1f} deg（棋盘动了或拍照时云台没停稳）",
+      sample_ids[keep[worst]], worst_err);
+    keep.erase(keep.begin() + worst);
+  }
+  auto pick = [&](const std::vector<cv::Mat> & v) {
+    std::vector<cv::Mat> r;
+    for (auto i : keep) r.push_back(v[i]);
+    return r;
+  };
+  R_g2w = pick(R_g2w), t_g2w = pick(t_g2w), rvecs = pick(rvecs), tvecs = pick(tvecs);
 
   if (R_g2w.size() < 5) {
     pb.hand = StepState::Fail;
@@ -1143,6 +1340,29 @@ int main(int argc, char * argv[])
     tools::logger()->error("读取配置失败: {}", e.what());
     return 1;
   }
+
+  const std::string mode = cli.has("mode") ? cli.get<std::string>("mode") : "";
+  std::string intrinsics_yaml = "calib_chessboard/output/intrinsics.yaml";
+  if (mode == "intra") {
+    cfg.do_capture = true;
+    cfg.do_intrinsics = true;
+    cfg.do_handeye = false;
+    cfg.use_imu = false;
+    cfg.data_dir = "calib_chessboard/data_intrinsics";
+    cfg.output_yaml = intrinsics_yaml;
+    cfg.export_to.clear();
+  } else if (mode == "hand") {
+    cfg.do_capture = true;
+    cfg.do_intrinsics = false;
+    cfg.do_handeye = true;
+    cfg.use_imu = true;
+    cfg.data_dir = "calib_chessboard/data_handeye";
+    cfg.output_yaml = "calib_chessboard/output/handeye.yaml";
+    cfg.export_to.clear();
+  } else if (!mode.empty()) {
+    tools::logger()->error("未知模式 {}，只能是 intra 或 hand", mode);
+    return 1;
+  }
   bool want_handeye = cfg.do_handeye && cfg.use_imu;
 
   ProgressBoard pb;
@@ -1163,32 +1383,34 @@ int main(int argc, char * argv[])
     "IMU: {}\n"
     "步骤: {}{}{}\n"
     "数据目录: {}\n"
+    "结果: {}\n"
     "===========================\n\n",
     config_path, cfg.cols, cfg.rows, cfg.square_mm, cfg.detector,
-    cfg.use_imu ? "开启（采集四元数 + 可选手眼）" : "关闭（只标内参）",
+    cfg.use_imu ? "USB DM-IMU（只用于手眼）" : "关闭（只标内参）",
     cfg.do_capture ? "采集 " : "", cfg.do_intrinsics ? "内参 " : "",
-    want_handeye ? "手眼" : (cfg.do_handeye ? "手眼(跳过,无IMU)" : ""), cfg.data_dir);
+    want_handeye ? "手眼" : (cfg.do_handeye ? "手眼(跳过,无IMU)" : ""), cfg.data_dir,
+    cfg.output_yaml);
 
   if (cfg.do_handeye && !cfg.use_imu)
-    tools::logger()->warn("use_imu=false，跳过手眼。接上 IMU 后把 use_imu 改为 true 再采一组即可。");
+    tools::logger()->warn("use_imu=false，跳过手眼。手眼请用 ./calib_chessboard/run.sh hand");
 
-  std::unique_ptr<io::CBoard> cboard;
+  std::unique_ptr<io::DM_IMU> imu;
   if (cfg.do_capture && cfg.use_imu) {
     try {
-      cboard = std::make_unique<io::CBoard>(cfg.path);
-      tools::logger()->info("IMU / C 板已连接");
+      imu = std::make_unique<io::DM_IMU>(cfg.imu_port);
+      tools::logger()->info("USB IMU 已连接 {}", cfg.imu_port);
     } catch (const std::exception & e) {
-      tools::logger()->error("打开 IMU 失败: {}  —— 改为只标内参", e.what());
+      tools::logger()->error("打开 USB IMU 失败: {}  —— 改为只标内参", e.what());
       cfg.use_imu = false;
       want_handeye = false;
       pb.imu = false;
       pb.hand = StepState::Skip;
-      cboard.reset();
+      imu.reset();
     }
   }
 
   if (cfg.do_capture) {
-    const int n = capture_loop(cfg, cboard.get(), pb);
+    const int n = capture_loop(cfg, imu.get(), pb);
     if (n < 0) {
       pb.capture = StepState::Fail;
       pb.hint = "failed to open camera";
@@ -1207,10 +1429,13 @@ int main(int argc, char * argv[])
       return 1;
     }
   } else if (want_handeye) {
-    have_intra = load_intrinsics_from_yaml(cfg.path, intra) ||
-                 (fs::exists(cfg.output_yaml) && load_intrinsics_from_yaml(cfg.output_yaml, intra));
+    auto try_load = [&](const std::string & path) {
+      return fs::exists(path) && load_intrinsics_from_yaml(path, intra);
+    };
+    have_intra = try_load(intrinsics_yaml) || try_load("configs/demo.yaml") || try_load(cfg.path);
     if (!have_intra) {
-      tools::logger()->error("未开内参步骤，配置里也没有 camera_matrix");
+      tools::logger()->error(
+        "手眼需要内参。先跑 ./calib_chessboard/run.sh intra，或在 configs/demo.yaml 里写 camera_matrix");
       return 1;
     }
     pb.intra = StepState::Skip;

@@ -58,6 +58,8 @@ int main(int argc, char * argv[])
     config_yaml["gun_yaw_offset"] ? config_yaml["gun_yaw_offset"].as<double>() : 0.0;
   double gun_pitch_offset_deg =
     config_yaml["gun_pitch_offset"] ? config_yaml["gun_pitch_offset"].as<double>() : 0.0;
+  const double default_bullet_speed =
+    config_yaml["bullet_speed"] ? config_yaml["bullet_speed"].as<double>() : 22.0;
 
   io::CBoard cboard(config_path);
   io::Camera camera(config_path);
@@ -221,7 +223,7 @@ int main(int argc, char * argv[])
           has_detect_yaw = true;
           solver.solve(det_armor);
           // 与原版 Aimer 相同的弹道公式。原版 pitch 抬头为负，这里取反后抬头为正，和下发约定一致。
-          double speed = cboard.bullet_speed < 14 ? 23 : cboard.bullet_speed;
+          double speed = cboard.bullet_speed < 14 ? default_bullet_speed : cboard.bullet_speed;
           const auto & xyz = det_armor.xyz_in_world;
           double d = std::sqrt(xyz.x() * xyz.x() + xyz.y() * xyz.y());
           tools::Trajectory traj(speed, d, xyz.z());
@@ -306,11 +308,14 @@ int main(int argc, char * argv[])
       const auto & aim_point = aimer.debug_aim_point;
       if (!targets.empty() && aim_point.valid) {
         const auto & target = targets.front();
+        const double vis_speed =
+          cboard.bullet_speed < 14 ? default_bullet_speed : cboard.bullet_speed;
         rviz_json["aim"] = {
           {"xyza", {aim_point.xyza[0], aim_point.xyza[1], aim_point.xyza[2], aim_point.xyza[3]}},
           {"armor_type", auto_aim::ARMOR_TYPES[target.armor_type]},
           {"control", command.control},
-          {"shoot", command.shoot}};
+          {"shoot", command.shoot},
+          {"speed", vis_speed}};
       }
 
       // 自身位姿与解算器使用同一旋转：IMU 四元数经 R_gimbal2imubody 得到云台姿态。
@@ -422,7 +427,7 @@ int main(int argc, char * argv[])
           white);
         const bool default_speed = cboard.bullet_speed < 14;
         line(
-          fmt::format("  v {:.1f}{}", default_speed ? 23.0 : cboard.bullet_speed, default_speed ? " default" : ""),
+          fmt::format("  v {:.1f}{}", default_speed ? default_bullet_speed : cboard.bullet_speed, default_speed ? " default" : ""),
           default_speed ? orange : white);
       }
 

@@ -22,6 +22,7 @@ Aimer::Aimer(const std::string & config_path)
   high_speed_delay_time_ = yaml["high_speed_delay_time"].as<double>();
   low_speed_delay_time_ = yaml["low_speed_delay_time"].as<double>();
   decision_speed_ = yaml["decision_speed"].as<double>();
+  default_bullet_speed_ = yaml["bullet_speed"] ? yaml["bullet_speed"].as<double>() : 22.0;
   if (yaml["left_yaw_offset"].IsDefined() && yaml["right_yaw_offset"].IsDefined()) {
     left_yaw_offset_ = yaml["left_yaw_offset"].as<double>() / 57.3;    // degree to rad
     right_yaw_offset_ = yaml["right_yaw_offset"].as<double>() / 57.3;  // degree to rad
@@ -40,7 +41,7 @@ io::Command Aimer::aim(
   double delay_time =
     target.ekf_x()[7] > decision_speed_ ? high_speed_delay_time_ : low_speed_delay_time_;
 
-  if (bullet_speed < 14) bullet_speed = 23;
+  if (bullet_speed < 14) bullet_speed = default_bullet_speed_;
 
   // 考虑detecor和tracker所消耗的时间，此外假设aimer的用时可忽略不计
   auto future = timestamp;

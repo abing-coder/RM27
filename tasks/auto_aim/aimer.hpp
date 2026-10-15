@@ -42,6 +42,7 @@ private:
   double high_speed_delay_time_;
   double low_speed_delay_time_;
   double decision_speed_;
+  double default_bullet_speed_;
 
   AimPoint choose_aim_point(const Target & target);
 };

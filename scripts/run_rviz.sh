@@ -5,6 +5,7 @@
 #   ./scripts/run_rviz.sh configs/standard3.yaml # 指定配置
 #   NO_STANDARD=1 ./scripts/run_rviz.sh          # 只开桥接和 rviz2，主程序自己另开
 #   ROS_DISTRO=humble ./scripts/run_rviz.sh      # 指定 ROS2 发行版（默认 humble）
+#   VIEW_LIFT=0.5 ./scripts/run_rviz.sh          # 显示时 gimbal 及标记上抬高度（米），0=不抬
 set -eo pipefail
 
 cd "$(dirname "$0")/.."
@@ -40,7 +41,7 @@ if [ ! -x build/rviz_bridge ]; then
 fi
 
 echo "[run_rviz] 启动桥接节点 ./build/rviz_bridge ..."
-./build/rviz_bridge &
+./build/rviz_bridge --ros-args -p view_lift:="${VIEW_LIFT:-0.3}" &
 pids+=($!)
 
 echo "[run_rviz] 启动 rviz2 ..."

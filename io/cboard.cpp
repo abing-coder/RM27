@@ -1,6 +1,7 @@
 
 
 #include "cboard.hpp"
+#include <iostream>
 
 #if defined(__linux__)
 #include "io/socketcan.hpp"
@@ -92,47 +93,50 @@ Eigen::Quaterniond CBoard::imu_at(std::chrono::steady_clock::time_point timestam
 }
 
 // 与达妙 can_handler 协议一致：8 字节 = yaw(int16 大端) + pitch(int16 大端) + flag(有无装甲板 int16) + shoot(火控 int16)
-void CBoard::send(Command command) const
+// yaw_i / pitch_i 单位是 0.1 度，不是弧度
+CanTx CBoard::send(Command command) const
 {
+  CanTx tx;
+  tx.yaw_i = static_cast<int16_t>(command.yaw * 10);
+  tx.pitch_i = static_cast<int16_t>(command.pitch * 10);
+  tx.flag_i = command.control ? 1 : 0;  // 有无装甲板：有=1，无=0
+  tx.shoot_i = command.shoot ? 1 : 0;   // 火控：开火=1，不开火=0
+  std::cout << "send: " << tx.yaw_i << " " << tx.pitch_i << " " << tx.flag_i << " " << tx.shoot_i << std::endl;
+
   // 若配置了 can_send_hz_ > 0，则按该频率限流发送
   if (can_send_hz_ > 0.0) {
     auto now = std::chrono::steady_clock::now();
     auto period = std::chrono::duration<double>(1.0 / can_send_hz_);
-    if (last_send_inited_) {
-      auto dt = now - last_send_time_;
-      if (dt < period) {
-        return;  // 距离上次发送间隔未到，丢弃本次指令
-      }
+    if (last_send_inited_ && now - last_send_time_ < period) {
+      tx = last_tx_;
+      tx.written = false;
+      return tx;
     }
     last_send_time_ = now;
     last_send_inited_ = true;
   }
 
-  int16_t yaw_i = static_cast<int16_t>(command.yaw*10);
-  int16_t pitch_i = static_cast<int16_t>(command.pitch*10);
-  int16_t flag_i = command.control ? 1 : 0;    // 有无装甲板：有=1，无=0
-  int16_t shoot_i = command.shoot ? 1 : 0;     // 火控：开火=1，不开火=0
-  std::cout << "yaw_i: " << command.yaw << "   " << "pitch_i: " << command.pitch << std::endl;
-  std::cout << "flag_i: " << flag_i << "   " << "shoot_i: " << shoot_i << std::endl;
-
   can_frame frame;
   frame.can_id = send_canid_;
   frame.can_dlc = 8;
-  frame.data[0] = (yaw_i >> 8) & 0xFF;
-  frame.data[1] = yaw_i & 0xFF;
-  frame.data[2] = (pitch_i >> 8) & 0xFF;
-  frame.data[3] = pitch_i & 0xFF;
-  frame.data[4] = (flag_i >> 8) & 0xFF;
-  frame.data[5] = flag_i & 0xFF;
-  frame.data[6] = (shoot_i >> 8) & 0xFF;
-  frame.data[7] = shoot_i & 0xFF;
+  frame.data[0] = (tx.yaw_i >> 8) & 0xFF;
+  frame.data[1] = tx.yaw_i & 0xFF;
+  frame.data[2] = (tx.pitch_i >> 8) & 0xFF;
+  frame.data[3] = tx.pitch_i & 0xFF;
+  frame.data[4] = (tx.flag_i >> 8) & 0xFF;
+  frame.data[5] = tx.flag_i & 0xFF;
+  frame.data[6] = (tx.shoot_i >> 8) & 0xFF;
+  frame.data[7] = tx.shoot_i & 0xFF;
 
-  if (can_disabled_) return;
+  if (can_disabled_) return tx;
   try {
     can_->write(&frame);
+    tx.written = true;
+    last_tx_ = tx;
   } catch (const std::exception & e) {
     tools::logger()->warn("{}", e.what());
   }
+  return tx;
 }
 
 void CBoard::callback(const can_frame & frame)

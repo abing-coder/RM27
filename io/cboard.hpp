@@ -4,6 +4,7 @@
 #include <Eigen/Geometry>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -36,6 +37,16 @@ enum ShootMode
 };
 const std::vector<std::string> SHOOT_MODES = {"left_shoot", "right_shoot", "both_shoot"};
 
+// 实际写入 CAN 的一帧。yaw_i / pitch_i = 角度(度) × 10，int16 大端
+struct CanTx
+{
+  bool written = false;  // 本次调用是否写进总线；限频丢弃时为 false，数值仍是上一帧已发出的
+  int16_t yaw_i = 0;
+  int16_t pitch_i = 0;
+  int16_t flag_i = 0;
+  int16_t shoot_i = 0;
+};
+
 class CBoard
 {
 public:
@@ -48,7 +59,7 @@ public:
 
   Eigen::Quaterniond imu_at(std::chrono::steady_clock::time_point timestamp);
 
-  void send(Command command) const;
+  CanTx send(Command command) const;
 
 private:
   struct IMUData
@@ -68,6 +79,7 @@ private:
   int quaternion_canid_, bullet_speed_canid_, send_canid_;
   mutable std::chrono::steady_clock::time_point last_send_time_{};
   mutable bool last_send_inited_ = false;
+  mutable CanTx last_tx_;
 
   void callback(const can_frame & frame);
 

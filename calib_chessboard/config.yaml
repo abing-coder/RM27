@@ -5,14 +5,15 @@
 # 请先数清：横着能点几个内角点、竖着能点几个，再用尺子量相邻角点间距（mm）。
 # =============================================================================
 
-##### 要跑哪些步骤（无 IMU 时 handeye 会自动跳过） #####
+##### 要跑哪些步骤 #####
 steps:
   capture: true        # 打开相机采图（已有 data/*.jpg 可改 false）
   intrinsics: true     # 相机内参 camera_matrix / distort_coeffs
   handeye: true        # 手眼 R_camera2gimbal / t_camera2gimbal（必须 use_imu: true）
 
-# 没接 IMU / CAN 时务必 false：只采图、只标内参，不打开 C 板
-use_imu: false
+# 手眼必须开。姿态来自 USB 上的 DM-IMU，和主程序同一路，不读电控 CAN。
+use_imu: true
+dm_imu_port: "/dev/ttyACM0"
 
 ##### 棋盘格 #####
 chessboard:
@@ -24,8 +25,8 @@ chessboard:
 ##### 路径（相对仓库根目录） #####
 data_dir: calib_chessboard/data
 output_yaml: calib_chessboard/output/result.yaml
-# 标定成功后把结果写回机器人配置；留空则只写 output_yaml
-export_to: ""                # 例如 configs/demo.yaml
+# 留空则只打印并写入 output_yaml，不改主程序配置
+export_to: ""
 
 ##### 采集 #####
 capture:
@@ -35,6 +36,8 @@ capture:
   auto_save: true            # true=和 ROS 一样，姿态够新就自动收图，不用一直按 s
   auto_save_interval_s: 1.5
   auto_min_corner_shift_px: 40
+  handeye_still_s: 0.5       # 手眼：云台静止这么久才自动收图（避免边转边拍）
+  handeye_still_deg: 0.2     # 手眼：静止判定，相邻帧 yaw/pitch 变化小于此值
   show_each: false           # true=内参时逐张暂停；标定请保持 false，按一次 C 就会自动算完
 
 
@@ -42,6 +45,7 @@ capture:
 calib:
   fix_k3: true               # 小视场工业相机建议 true
   handeye_method: tsai       # tsai / park / horaud / andreff / daniilidis
+  handeye_max_mismatch_deg: 1.5  # 相机转角与 IMU 转角相差超过此值的样本会被剔除
 
 ##### 相机（与主程序同一套字段） #####
 # opencv     : 普通 USB 摄像头（免 SDK，桌面标定最方便）
@@ -65,9 +69,9 @@ video_path: "assets/demo/demo.avi"
 video_fps: 10
 video_loop: true
 
-##### IMU / CAN（仅 use_imu: true 时使用） #####
-# 按 C 板安装填写，采集画面上的 yaw/pitch/roll 应与云台动作同号
-R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+##### IMU（与主程序同一路 USB） #####
+# 云台 +X(枪口)=IMU -Y，+Y(左)=IMU +Z，+Z(上)=IMU -X。采集画面上的 yaw/pitch/roll 应与云台动作同号。
+R_gimbal2imubody: [0, 0, -1, -1, 0, 0, 0, 1, 0]
 quaternion_canid: 0x100
 bullet_speed_canid: 0x101
 send_canid: 0x520
