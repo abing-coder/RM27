@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <yaml-cpp/yaml.h>
@@ -25,6 +27,7 @@
 #include "tools/trajectory.hpp"
 #include "tools/plotter.hpp"
 #include "tools/recorder.hpp"
+#include "tools/vision_config.hpp"
 
 using namespace std::chrono;
 
@@ -33,7 +36,7 @@ const std::string keys =
   "{d display      |      | 显示自瞄可视化窗口 }"
   "{@config-path   | configs/standard3.yaml | 位置参数，yaml配置文件路径 }";
 
-int main(int argc, char * argv[])
+int main(int argc, char * argv[]) try
 {
   cv::CommandLineParser cli(argc, argv, keys);
   auto config_path = cli.get<std::string>(0);
@@ -50,41 +53,46 @@ int main(int argc, char * argv[])
   // 由其转为 MarkerArray/TF 发布；主程序本身不链接 rclcpp，无 ROS 环境也可正常运行
   tools::Plotter rviz_plotter("127.0.0.1", 9871);
 
-  auto config_yaml = YAML::LoadFile(config_path);
+  auto config_yaml = tools::load_vision_config(config_path);
+  const bool video_replay = config_yaml["camera_name"].as<std::string>() == "video";
+  if (video_replay && config_yaml["video_calibration_path"] &&
+      !config_yaml["video_calibration_path"].as<std::string>().empty()) {
+    tools::logger()->info(
+      "[standard] 使用录像标定 {}，实机标定保持原样",
+      config_yaml["video_calibration_path"].as<std::string>());
+  }
   std::string aim_mode =
     config_yaml["aim_mode"] ? config_yaml["aim_mode"].as<std::string>() : "absolute";
-  // 枪口偏移：以“度”为单位读入
-  double gun_yaw_offset_deg =
-    config_yaml["gun_yaw_offset"] ? config_yaml["gun_yaw_offset"].as<double>() : 0.0;
-  double gun_pitch_offset_deg =
-    config_yaml["gun_pitch_offset"] ? config_yaml["gun_pitch_offset"].as<double>() : 0.0;
   const double default_bullet_speed =
     config_yaml["bullet_speed"] ? config_yaml["bullet_speed"].as<double>() : 22.0;
+  auto_aim::Aimer aimer(config_path);
+  const bool use_delta_aim = (aim_mode == "delta");
+  if (use_delta_aim && !aimer.barrel_translation().isZero(0)) {
+    throw std::runtime_error(
+      "非零 t_barrel2gimbal 需要 aim_mode: absolute，delta 像点模式不支持枪口平移弹道");
+  }
 
   io::CBoard cboard(config_path);
   io::Camera camera(config_path);
 
-  // 姿态只来自 USB 上的 DM-IMU，不使用电控回传的四元数。
-  const auto imu_port = config_yaml["dm_imu_port"]
-                          ? config_yaml["dm_imu_port"].as<std::string>()
-                          : std::string("/dev/ttyACM0");
-  io::DM_IMU dm_imu(imu_port);
-  if (aim_mode == "delta") {
-    tools::logger()->warn(
-      "[standard] 姿态已使用 USB IMU 四元数，但 aim_mode=delta 时下发 yaw 仍是像素差值。"
-      "要用这路姿态做世界系绝对角，请把 aim_mode 改为 absolute。");
+  // 实机使用 USB IMU；视频使用当前帧的录制姿态，无配套文件时固定云台水平。
+  std::unique_ptr<io::DM_IMU> dm_imu;
+  if (video_replay) {
+    tools::logger()->info("[standard] 视频回放模式，不初始化 USB IMU");
+  } else {
+    const auto imu_port = config_yaml["dm_imu_port"]
+                            ? config_yaml["dm_imu_port"].as<std::string>()
+                            : std::string("/dev/ttyACM0");
+    dm_imu = std::make_unique<io::DM_IMU>(imu_port);
   }
 
   // 开显示时同时开 YOLO 的 detection 窗口，便于对比是否有检测结果
   auto_aim::YOLO detector(config_path, show_display);
   auto_aim::Solver solver(config_path);
   auto_aim::Tracker tracker(config_path, solver);
-  auto_aim::Aimer aimer(config_path);
   auto_aim::Shooter shooter(config_path);
 
-  const bool use_delta_aim = (aim_mode == "delta");  // 无 IMU：yaw 发差值，pitch 可复用弹道
-
-  // rviz2 里的相机与虚拟枪口，都是相对 gimbal 的固定变换
+  // 相机使用手眼外参；枪口原点由 t_barrel2gimbal 指定，参考轴向与云台一致。
   const auto R_camera2gimbal_data = config_yaml["R_camera2gimbal"].as<std::vector<double>>();
   const auto t_camera2gimbal_data = config_yaml["t_camera2gimbal"].as<std::vector<double>>();
   const Eigen::Quaterniond q_camera2gimbal =
@@ -92,17 +100,12 @@ int main(int argc, char * argv[])
       .normalized();
   const Eigen::Vector3d t_camera2gimbal(t_camera2gimbal_data.data());
 
-  // 虚拟枪口：云台执行下发角后指向瞄准点的方向。云台比理想方向多转了补偿角，所以枪口相对 gimbal 转了 -补偿。
-  // 下发 yaw 右转为正、减去 gun_yaw_offset，换成左转为正就是 +gun_yaw_offset；
-  // delta 模式的 yaw 来自像素差，不叠加 Aimer 的 yaw_offset。
-  constexpr double deg2rad = 3.141592653589793 / 180.0;
-  const double yaw_comp_deg =
-    (use_delta_aim ? 0.0 : config_yaml["yaw_offset"].as<double>()) + gun_yaw_offset_deg;
-  const double pitch_comp_deg = config_yaml["pitch_offset"].as<double>() - gun_pitch_offset_deg;
-  // 绕 +Z 为左转；抬头为正的 pitch 对应绕 +Y 的负转角
-  const Eigen::Quaterniond q_barrel2gimbal(
-    Eigen::AngleAxisd(-yaw_comp_deg * deg2rad, Eigen::Vector3d::UnitZ()) *
-    Eigen::AngleAxisd(pitch_comp_deg * deg2rad, Eigen::Vector3d::UnitY()));
+  const Eigen::Vector3d & t_barrel2gimbal = aimer.barrel_translation();
+  // Solver 使用 R_world = R_imu * R_install，因此水平云台应传入 R_install 的逆。
+  const auto install_data = config_yaml["R_gimbal2imubody"].as<std::vector<double>>();
+  const Eigen::Matrix3d install =
+    Eigen::Matrix<double, 3, 3, Eigen::RowMajor>(install_data.data());
+  const Eigen::Quaterniond level_imu(install.transpose());
 
   // 调试窗口的一步预测曲线：上一帧跟踪结果外推到本帧时刻（红） vs 本帧检测（绿），世界系角度
   tools::CurvePlot yaw_plot("yaw", "deg");
@@ -138,7 +141,11 @@ int main(int argc, char * argv[])
   while (!exiter.exit()) {
     frame_count++;
     camera.read(img, t);
-    q = dm_imu.imu_at(t - 1ms);
+    if (img.empty()) {
+      tools::logger()->info("[standard] 视频播放结束");
+      break;
+    }
+    q = video_replay ? camera.recorded_attitude().value_or(level_imu) : dm_imu->imu_at(t - 1ms);
     mode = cboard.mode;
 
     if (last_mode != mode) {
@@ -163,7 +170,8 @@ int main(int argc, char * argv[])
     auto targets = tracker.track(armors, t);
     size_t armors_after_color = armors.size();
 
-    auto command = aimer.aim(targets, t, cboard.bullet_speed);
+    auto command = aimer.aim(
+      targets, t, cboard.bullet_speed, solver.R_gimbal2world(), !video_replay);
     const io::Command aim_world = command;  // Aimer 原始输出（世界系，弧度），调试显示用
     io::Command fire_cmd = command;  // 专门给 Shooter 用的指令（可单独修改 yaw 基准）
     // 统一约定：io::Command 中 yaw/pitch 以“度”为单位
@@ -237,15 +245,15 @@ int main(int argc, char * argv[])
         // 无 IMU 的 delta 模式下，仍要求当前帧存在检测结果，避免纯 tracker 预测导致 yaw 抽动
         if (has_predicted_yaw && has_detect_yaw && measured_pitch.has_value()) {
           command.control = true;
-          // 发送角度（度）：差值(弧度)转度，再减枪口偏移(已是度)；下位机接收的就是“度”
+          // 发送角度（度）：yaw 差值和弹道 pitch 从弧度转为度。
           const double rad2deg = 180.0 / 3.141592653589793;
-          command.yaw = ((delta_yaw_pred * rad2deg) - gun_yaw_offset_deg);
-          command.pitch = (measured_pitch.value() * rad2deg) - gun_pitch_offset_deg;
+          command.yaw = delta_yaw_pred * rad2deg;
+          command.pitch = measured_pitch.value() * rad2deg;
           // 火控判断：yaw 也以检测框为基准
           if (has_detect_yaw) {
-            fire_cmd.yaw = ((delta_yaw_det * rad2deg) - gun_yaw_offset_deg);
+            fire_cmd.yaw = ypr[0] * rad2deg - delta_yaw_det * rad2deg;
           } else {
-            fire_cmd.yaw = command.yaw;
+            fire_cmd.yaw = ypr[0] * rad2deg - command.yaw;
           }
           fire_cmd.pitch = command.pitch;
         } else {
@@ -266,23 +274,19 @@ int main(int argc, char * argv[])
       command.pitch = -command.pitch;
       const double gimbal_pitch_up = -ypr[1];  // 绕 +Y 正转是低头
       // Shooter 用 IMU 云台 yaw 判断是否跟上，这里给它云台应到达的世界系角度
-      fire_cmd.yaw = aim_world.yaw * rad2deg + gun_yaw_offset_deg;
-      fire_cmd.pitch = command.pitch * rad2deg - gun_pitch_offset_deg;
+      fire_cmd.yaw = aim_world.yaw * rad2deg;
+      fire_cmd.pitch = command.pitch * rad2deg;
       if (command.control) {
-        command.yaw = -tools::limit_rad(command.yaw - ypr[0]) * rad2deg - gun_yaw_offset_deg;
-        command.pitch = (command.pitch - gimbal_pitch_up) * rad2deg - gun_pitch_offset_deg;
+        command.yaw = -tools::limit_rad(command.yaw - ypr[0]) * rad2deg;
+        command.pitch = (command.pitch - gimbal_pitch_up) * rad2deg;
       } else {
         command.yaw = 0;
         command.pitch = 0;
       }
     }
-    // 火控 shoot：control=1 且存在目标时，由 Shooter 判定是否开火
-    if (command.control && !targets.empty()) {
-      command.shoot = shooter.shoot(fire_cmd, aimer, targets, ypr);
-    } else {
-      shooter.reset_debug_state();
-      command.shoot = false;
-    }
+    // 火控接收目标世界角与实际下发差值；失去目标时同样调用以清空连续就绪帧数。
+    fire_cmd.control = command.control;
+    command.shoot = shooter.shoot(fire_cmd, aimer, targets, ypr, command);
     cboard.send(command);
 
     // 发布整车估计与火控状态给 rviz2 桥接节点（无人监听时 UDP 直接丢弃，开销可忽略）
@@ -316,6 +320,14 @@ int main(int argc, char * argv[])
           {"control", command.control},
           {"shoot", command.shoot},
           {"speed", vis_speed}};
+        if (aimer.debug_ballistics.valid) {
+          const auto & solution = aimer.debug_ballistics;
+          const auto & origin = solution.origin_world;
+          const auto & velocity = solution.velocity_world;
+          rviz_json["aim"]["origin"] = {origin.x(), origin.y(), origin.z()};
+          rviz_json["aim"]["velocity"] = {velocity.x(), velocity.y(), velocity.z()};
+          rviz_json["aim"]["fly_time"] = solution.fly_time;
+        }
       }
 
       // 自身位姿与解算器使用同一旋转：IMU 四元数经 R_gimbal2imubody 得到云台姿态。
@@ -327,7 +339,8 @@ int main(int argc, char * argv[])
         {"t", {t_camera2gimbal.x(), t_camera2gimbal.y(), t_camera2gimbal.z()}},
         {"q", {q_camera2gimbal.x(), q_camera2gimbal.y(), q_camera2gimbal.z(), q_camera2gimbal.w()}}};
       rviz_json["barrel"] = {
-        {"q", {q_barrel2gimbal.x(), q_barrel2gimbal.y(), q_barrel2gimbal.z(), q_barrel2gimbal.w()}}};
+        {"t", {t_barrel2gimbal.x(), t_barrel2gimbal.y(), t_barrel2gimbal.z()}},
+        {"q", {0.0, 0.0, 0.0, 1.0}}};
 
       rviz_plotter.plot(rviz_json);
     }
@@ -561,6 +574,11 @@ int main(int argc, char * argv[])
   }
 
   return 0;
+}
+catch (const std::exception & error)
+{
+  tools::logger()->error("[standard] {}", error.what());
+  return 1;
 }
 
 /*

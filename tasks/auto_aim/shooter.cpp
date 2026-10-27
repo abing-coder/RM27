@@ -41,34 +41,47 @@ void Shooter::reset_debug_state()
 
 bool Shooter::shoot(
   const io::Command & command, const auto_aim::Aimer & aimer,
-  const std::list<auto_aim::Target> & targets, const Eigen::Vector3d & gimbal_pos)
+  const std::list<auto_aim::Target> & targets, const Eigen::Vector3d & gimbal_pos,
+  std::optional<io::Command> delta_command)
 {
   reset_debug_state();
-  if (!command.control || targets.empty() || !auto_fire_) return false;
+  if (!command.control || targets.empty() || !auto_fire_ || !aimer.debug_aim_point.valid ||
+      !aimer.debug_ballistics.valid || !gimbal_pos.allFinite() ||
+      !std::isfinite(command.yaw) || !std::isfinite(command.pitch)) {
+    fire_ready_streak_ = 0;
+    debug_fire_ready_streak = 0;
+    last_command_ = {false, false, 0, 0};
+    return false;
+  }
 
-  // 目标位置（m）
-  auto target_x = targets.front().ekf_x()[0];
-  auto target_y = targets.front().ekf_x()[2];
-  // 距离越远容差越大（单位：度）
-  auto tolerance = std::sqrt(tools::square(target_x) + tools::square(target_y)) > judge_distance_
+  // 使用当前实际枪口到预测瞄准点的水平距离（m）选择容差。
+  const Eigen::Vector3d relative = aimer.debug_aim_point.xyza.head(3) -
+    aimer.barrel_position(tools::rotation_matrix(gimbal_pos));
+  auto tolerance = relative.head<2>().norm() > judge_distance_
                      ? second_tolerance_
                      : first_tolerance_;
 
   // 将云台姿态从弧度转为角度（deg）
   const double rad2deg = 180.0 / 3.141592653589793;
-  double gimbal_yaw_deg = gimbal_pos[0] * rad2deg;
+  const double yaw_error = tools::limit_rad(gimbal_pos[0] - command.yaw / rad2deg) * rad2deg;
+  const double pitch_error = -gimbal_pos[1] * rad2deg - command.pitch;
+  debug_hit_yaw_error_deg = yaw_error;
+  debug_hit_pitch_error_deg = pitch_error;
+  debug_hit_window_ok = std::abs(yaw_error) < tolerance && std::abs(pitch_error) < tolerance;
 
   // 此处所有比较都在“度”空间：Command 中的 yaw/pitch 也按“度”理解
   bool command_stable =
-    std::abs(last_command_.yaw - command.yaw) < tolerance * 2 &&
+    std::abs(tools::limit_rad((last_command_.yaw - command.yaw) / rad2deg)) * rad2deg < tolerance * 2 &&
     std::abs(last_command_.pitch - command.pitch) < tolerance * 2;
   bool gimbal_ok =
-    !use_gimbal_feedback_ || (std::abs(gimbal_yaw_deg - last_command_.yaw) < tolerance);
+    !use_gimbal_feedback_ || debug_hit_window_ok;
   // 无云台反馈时：仅当当前 delta（瞄准误差）足够小才开火，即认为云台已跟上目标
-  bool delta_small =
-    use_gimbal_feedback_ || (std::abs(command.yaw) < tolerance && std::abs(command.pitch) < tolerance);
+  const io::Command & delta = delta_command ? *delta_command : command;
+  bool delta_small = use_gimbal_feedback_ ||
+    (std::isfinite(delta.yaw) && std::isfinite(delta.pitch) &&
+     std::abs(delta.yaw) < tolerance && std::abs(delta.pitch) < tolerance);
 
-  // 选板已回到原版 Aimer，不再提供小陀螺瞄准点和飞行时间，火控只保留原版的三个条件。
+  // command 为枪口模型求出的云台目标世界角（度，yaw 左转正、pitch 抬头正）。
   bool fire_ready =
     command_stable && gimbal_ok && delta_small && aimer.debug_aim_point.valid;
 

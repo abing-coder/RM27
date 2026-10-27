@@ -1,5 +1,5 @@
 enemy_color: "red"
-# emy_color: "blue"
+# enemy_color: "blue"
 
 
 #####-----神经网络参数-----#####
@@ -64,8 +64,10 @@ use_gimbal_feedback: true # 用 USB IMU 的云台 yaw 判断枪口是否跟上
 # camera_name: "video"
 camera_name: "hikrobot"
 video_path: "assets/demo/demo.avi"   # 视频文件路径（相对运行目录或绝对路径）
-video_fps: 10                       # 0 = 按视频自带帧率播放，可填具体帧率覆盖
+video_calibration_path: "configs/demo_video_calibration.yaml" # 仅 video 模式使用；换录像需配套更换
+video_fps: 10                       # 播放帧率，0 使用视频原帧率；不改变算法使用的录制时间
 video_loop: true                  # 播放到结尾是否从头循环
+# video_pose_path: "assets/demo/demo.txt" # 默认读取视频同名 txt；无文件时使用固定水平姿态
 exposure_ms: 2
 gain: 16
 vid_pid: "2bdf:0001"
@@ -84,14 +86,16 @@ distort_coeffs: [-0.084181060859895157, 0.12492053118405488, 0.00326971986772004
 R_camera2gimbal: [0.080124051169054855, 0.049856199072306449, 0.99553729002901814, -0.99587801146420585, 0.046597921825050737, 0.077817864039599074, -0.042510265893755027, -0.99766877925273834, 0.053384306663974312]
 t_camera2gimbal: [0.14876008166428353, -0.032417315284725086, -0.0013848821415997162]
 
+# 枪口发射点在云台坐标系中的位置，单位米，顺序为前、左、上。
+# 必须相对手眼标定采用的云台原点测量；零表示暂按发射点与云台原点重合。
+# 枪口参考轴向与云台一致，方向残差仍使用原版 yaw_offset、pitch_offset 校正。
+t_barrel2gimbal: [0.0, 0.0, 0.0]
+
 #####-----自瞄输出模式-----#####
 aim_mode: "absolute"     # "delta" = yaw 用预测像点差值，pitch 用 detector 裸测量点做弹道；"absolute" = 世界系预测+弹道，再减去 IMU 当前云台角
 # 两种模式下发给电控的都是差值（度）：yaw 右转为正，pitch 抬头为正，没有目标时为 0。
-# 姿态始终来自 USB 上的 DM-IMU，不使用电控回传四元数。aim_mode 只决定下发给云台的角度怎么算。
+# 实机姿态来自 USB DM-IMU；视频使用配套 txt 姿态，无配套文件时固定云台水平。
 dm_imu_port: "/dev/ttyACM0"
-# 枪口相对相机光轴的偏移（度），需自行调试后填入；开火判定以枪口对准为准（即发送的 command 为枪口差值）
-gun_yaw_offset: 1      # degree，枪口在相机 yaw 方向偏移，正=枪口在相机右侧
-gun_pitch_offset: 2  # degree，枪口在相机 pitch 方向偏移，正=枪口在相机上方
 
 #####-----cboard参数-----#####
 can_disabled: false   # 无 CAN 时 true；接上达妙后改为 false

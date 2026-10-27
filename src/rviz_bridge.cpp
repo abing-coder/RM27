@@ -3,9 +3,9 @@
 // 接收 standard.cpp 通过 UDP(9871) 发来的整车估计与火控状态：
 //   - 四块装甲板（绿色立方体）、旋转中心（青色球）、旋转轨迹（黄色圆环）
 //   - 火控选中的瞄准点：红色立方体（control 有效），开火时变橙色
-//   - 弹道：浅蓝曲线，从云台中心按无空气阻力模型落到瞄准点（与 tools::Trajectory 同一公式）
+//   - 弹道：浅蓝曲线，使用 Aimer 给出的预计发射点、初速度和飞行时间
 //   - 自身位姿：以 TF (world -> gimbal) 广播，rviz2 中以坐标轴显示
-//   - 相机 (gimbal -> camera) 与虚拟枪口 (gimbal -> barrel)，枪口另画一条品红射线
+//   - 相机 (gimbal -> camera) 与枪口参考系 (gimbal -> barrel)，枪口另画一条品红射线
 //
 // 用法（已 source /opt/ros/<distro>/setup.bash）:
 //   ./build/rviz_bridge
@@ -322,46 +322,71 @@ private:
       const ColorRGBA & color = bool_or(*aim, "shoot", false) ? ORANGE : RED;
       add_armor_cube(x, y, z, a, size, color, 1.15);
 
-      // 自身到瞄准点的直线
+      // 预计发射点到预测瞄准点的直线。兼容旧数据：未提供 origin 时从原点绘制。
+      double ox = 0, oy = 0, oz = 0;
+      if (aim->contains("origin") && (*aim)["origin"].is_array() &&
+          (*aim)["origin"].size() >= 3) {
+        ox = (*aim)["origin"][0].get<double>();
+        oy = (*aim)["origin"][1].get<double>();
+        oz = (*aim)["origin"][2].get<double>();
+      }
       Marker m = new_marker(Marker::LINE_STRIP);
       m.scale.x = 0.004;
       m.color = color;
-      m.points.push_back(make_point(0.0, 0.0, lift_));
+      m.points.push_back(make_point(ox, oy, oz + lift_));
       m.points.push_back(make_point(x, y, z + lift_));
       arr.markers.push_back(m);
 
-      // 弹道：与 tools::Trajectory 相同的无阻力模型，g = 9.7833
-      double speed = 22.0;
-      if (aim->contains("speed") && (*aim)["speed"].is_number()) speed = (*aim)["speed"].get<double>();
-      const double d = std::hypot(x, y);
+      // 与自瞄共用求解结果，避免在显示端重新假设发射点位于云台中心。
       constexpr double g = 9.7833;
-      if (d > 1e-3 && speed > 1.0) {
-        const double a = g * d * d / (2 * speed * speed);
-        const double delta = d * d - 4 * a * (a + z);
-        if (delta >= 0 && a > 1e-9) {
-          const double root = std::sqrt(delta);
-          const double pitch1 = std::atan((d + root) / (2 * a));
-          const double pitch2 = std::atan((d - root) / (2 * a));
-          const double t1 = d / (speed * std::cos(pitch1));
-          const double t2 = d / (speed * std::cos(pitch2));
-          const double pitch = t1 < t2 ? pitch1 : pitch2;
-          const double fly = t1 < t2 ? t1 : t2;
-          Marker arc = new_marker(Marker::LINE_STRIP);
-          arc.scale.x = 0.012;
-          arc.color = SKY;
-          constexpr int n = 32;
-          for (int i = 0; i <= n; ++i) {
-            const double t = fly * static_cast<double>(i) / n;
-            const double s = speed * std::cos(pitch) * t;
-            const double zz = speed * std::sin(pitch) * t - 0.5 * g * t * t;
-            arc.points.push_back(make_point(x / d * s, y / d * s, zz + lift_));
+      auto add_trajectory = [&](double vx, double vy, double vz, double fly) {
+        if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz) ||
+            !std::isfinite(fly) || fly <= 0) return;
+        Marker arc = new_marker(Marker::LINE_STRIP);
+        arc.scale.x = 0.012;
+        arc.color = SKY;
+        constexpr int n = 32;
+        for (int i = 0; i <= n; ++i) {
+          const double t = fly * static_cast<double>(i) / n;
+          arc.points.push_back(make_point(
+            ox + vx * t, oy + vy * t, oz + vz * t - 0.5 * g * t * t + lift_));
+        }
+        arr.markers.push_back(arc);
+      };
+      const bool has_solution = aim->contains("velocity") && (*aim)["velocity"].is_array() &&
+        (*aim)["velocity"].size() >= 3 && aim->contains("fly_time") &&
+        (*aim)["fly_time"].is_number();
+      if (has_solution) {
+        const auto & velocity = (*aim)["velocity"];
+        add_trajectory(
+          velocity[0].get<double>(), velocity[1].get<double>(), velocity[2].get<double>(),
+          (*aim)["fly_time"].get<double>());
+      } else {
+        // 旧发送端仍可按相同无阻力模型绘制。
+        double speed = 22.0;
+        if (aim->contains("speed") && (*aim)["speed"].is_number()) speed = (*aim)["speed"].get<double>();
+        const double dx = x - ox, dy = y - oy, dz = z - oz;
+        const double d = std::hypot(dx, dy);
+        if (d > 1e-3 && speed > 1.0) {
+          const double a = g * d * d / (2 * speed * speed);
+          const double delta = d * d - 4 * a * (a + dz);
+          if (delta >= 0 && a > 1e-9) {
+            const double root = std::sqrt(delta);
+            const double pitch1 = std::atan((d + root) / (2 * a));
+            const double pitch2 = std::atan((d - root) / (2 * a));
+            const double t1 = d / (speed * std::cos(pitch1));
+            const double t2 = d / (speed * std::cos(pitch2));
+            const double pitch = t1 < t2 ? pitch1 : pitch2;
+            const double fly = t1 < t2 ? t1 : t2;
+            const double horizontal_speed = speed * std::cos(pitch);
+            add_trajectory(
+              dx / d * horizontal_speed, dy / d * horizontal_speed, speed * std::sin(pitch), fly);
           }
-          arr.markers.push_back(arc);
         }
       }
     }
 
-    // 虚拟枪口指向：沿 barrel 的 X 轴画长射线，补偿角只有一两度，坐标轴本身看不出差别
+    // 当前枪口参考方向：原点和轴向均来自 barrel TF，不把经验角度补偿当作外参。
     if (has_barrel) {
       Marker m = new_marker(Marker::LINE_STRIP);
       m.header.frame_id = "barrel";

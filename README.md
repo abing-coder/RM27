@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 达妙 CAN 适配 | 抽象统一 CAN 接口，在 SocketCAN 之外增加 DM-USB2FDCAN SDK 后端，支持设备选择；增加禁用 CAN、仅发送和发送频率上限配置 | [`io/can_backend.hpp`](io/can_backend.hpp)、[`io/damiao_can.cpp`](io/damiao_can.cpp)、[`io/cboard.cpp`](io/cboard.cpp) |
 | USB IMU 姿态链路 | 调整达妙 IMU 驱动，解析 USB 虚拟串口数据，优先使用模块四元数，兼容两种 CRC 算法和欧拉角回退；通过姿态队列与插值匹配图像时刻 | [`io/dm_imu/`](io/dm_imu/)、[`src/standard.cpp`](src/standard.cpp) |
-| 坐标系与输出适配 | 按 IMU 安装旋转调整云台到世界系的变换；增加去畸变像点到角度增量的接口；在 `standard` 中将瞄准结果转换为电控需要的角度差，支持枪口偏移补偿 | [`tasks/auto_aim/solver.cpp`](tasks/auto_aim/solver.cpp)、[`src/standard.cpp`](src/standard.cpp) |
+| 坐标系与输出适配 | 按 IMU 安装旋转调整云台到世界系的变换；增加去畸变像点到角度增量的接口；在 `standard` 中将瞄准结果转换为电控需要的角度差，角度校正沿用原版 `yaw_offset`、`pitch_offset` | [`tasks/auto_aim/solver.cpp`](tasks/auto_aim/solver.cpp)、[`src/standard.cpp`](src/standard.cpp) |
 | 瞄准模式 | 增加 `absolute` / `delta` 两种计算路径。前者使用世界系预测与弹道结果结合当前姿态求角度差，后者使用预测像点计算 yaw 差值，并从当前检测点计算弹道 pitch | [`src/standard.cpp`](src/standard.cpp)、[`configs/demo.yaml`](configs/demo.yaml) |
 | 火控调整 | 在角度制下检查指令稳定性，增加 pitch 稳定性条件、可配置的连续满足帧数，以及云台反馈/角度误差判定路径；将弹速回退值改为可配置 | [`tasks/auto_aim/shooter.cpp`](tasks/auto_aim/shooter.cpp)、[`tasks/auto_aim/aimer.cpp`](tasks/auto_aim/aimer.cpp) |
 | 视频输入 | 增加 `camera_name: video`，可配置播放帧率与循环播放；录制回放入口增加 `.mp4`、`.mov` 扩展名尝试 | [`io/video/`](io/video/)、[`io/camera.cpp`](io/camera.cpp)、[`tests/auto_aim_test.cpp`](tests/auto_aim_test.cpp) |
@@ -140,10 +140,12 @@ cp configs/demo.yaml configs/local.yaml
 | `vid_pid`、`exposure_ms`、`gain` / `gamma` | 工业相机设备与曝光参数，按厂商类型填写 |
 | `camera_matrix`、`distort_coeffs` | 当前相机、镜头和分辨率对应的内参与畸变 |
 | `R_camera2gimbal`、`t_camera2gimbal` | 相机到云台的外参；平移单位为米 |
+| `t_barrel2gimbal` | 枪口发射点相对云台原点的位置，单位米，顺序为前、左、上；缺省为零 |
 | `R_gimbal2imubody` | 云台到 IMU 机体系的安装旋转 |
 | `dm_imu_port` | USB IMU 串口，例如 `/dev/ttyACM0` |
+| `video_calibration_path` | 录像录制设备的标定文件，仅在 `camera_name: video` 时覆盖几何参数 |
 | `aim_mode` | `absolute` 或 `delta`，两种模式向电控下发的都是角度差 |
-| `gun_yaw_offset`、`gun_pitch_offset` | 枪口偏移补偿，单位为度 |
+| `yaw_offset`、`pitch_offset` | 原版水平/俯仰角补偿，单位为度；`absolute` 模式下分别增大时向左/向上修正，`delta` 模式最终 yaw 不使用 `yaw_offset` |
 | `can_interface` | `damiao:1` 表示第一个达妙设备；或填写 `can0` 等 SocketCAN 接口名 |
 | `can_disabled` | `true` 时禁止 CAN 通信，适合只观察视觉结果 |
 | `can_send_only` | `true` 时不等待电控回传姿态，适合姿态由 USB IMU 提供的单向下发链路 |
@@ -152,7 +154,7 @@ cp configs/demo.yaml configs/local.yaml
 | `bullet_speed` | 弹速回传低于 `14 m/s` 时使用的回退值，默认 `22 m/s` |
 | `auto_fire`、`fire_ready_consecutive_frames` | 自动开火开关与连续满足开火条件的帧数 |
 
-`standard` 始终从 USB DM-IMU 获取姿态；`aim_mode: delta` 或 `can_disabled: true` 均不会跳过 USB IMU 初始化。串口需有访问权限，IMU 需持续输出有效姿态。Ubuntu 可将用户加入 `dialout` 组后重新登录：
+`standard` 使用工业相机时从 USB DM-IMU 获取姿态，单独设置 `can_disabled: true` 不会关闭实机 IMU。使用 `camera_name: video` 时不初始化 USB IMU，而是读取视频配套姿态；无配套文件则固定云台水平。实机串口需有访问权限，IMU 需持续输出有效姿态。Ubuntu 可将用户加入 `dialout` 组后重新登录：
 
 ```bash
 sudo usermod -aG dialout "$USER"
@@ -166,6 +168,21 @@ USB IMU 与相机可分别检查：
 ```
 
 普通 USB 摄像头保留在 `usbcamera_test` 等独立工具中；棋盘格标定工具另有 `camera_name: opencv` 输入方式，不能直接套用到 `standard` 的通用相机配置。
+
+枪口位置使用 `t_barrel2gimbal: [x, y, z]`，单位米，前、左、上为正，必须相对手眼标定采用的同一个云台原点测量。例如 `[0.15, -0.03, 0.05]` 表示发射点位于该原点前方 15 cm、右侧 3 cm、上方 5 cm；这是填写示例，不是设备标定值。参数缺失或全零时，发射点仍按云台原点处理。
+
+`standard` 的 `absolute` 路径会联合迭代目标命中时刻和发射姿态下的枪口位置，保持当前 roll，重新计算弹道与飞行时间。火控使用枪口到预测目标的水平距离选择容差，并检查 yaw、pitch 是否均跟上目标姿态；失去目标后清空连续就绪次数。非零枪口位置不支持旧的 `delta` 像点路径，启动时会报错，需要设置 `aim_mode: absolute`。
+
+枪口参考系与云台采用相同轴向，仅增加位置外参。`yaw_offset`、`pitch_offset` 继续作为原版经验角度校正，不被当作枪口旋转外参。RViz 的 `barrel` TF 显示当前枪口位置及参考方向，浅蓝弹道使用 Aimer 输出的预计发射点、理论初速度和飞行时间；经验角度校正后的真实落点仍需实测确认。这里的参考系描述不等于自动完成了枪口标定。
+
+无需硬件的回归检查：
+
+```bash
+cmake --build build --target barrel_aim_test -j2
+./build/barrel_aim_test configs/demo.yaml
+```
+
+检查覆盖非零枪口位置、不同朝向和 roll、运动目标拦截、零平移兼容、不可解弹道，以及俯仰未对准和目标丢失时禁止开火。MPC、打符入口尚未接入这套枪口位置模型。
 
 ### 5. CAN 下发协议
 
@@ -233,12 +250,19 @@ t_camera2gimbal
 ```yaml
 camera_name: video
 video_path: assets/demo/demo.avi
+video_calibration_path: configs/demo_video_calibration.yaml
 video_fps: 0        # 0 使用视频自身帧率，正数覆盖播放帧率
 video_loop: true
 can_disabled: true
 ```
 
-这种方式仍需连接 USB IMU，使用的是实时 IMU 姿态，不会读取视频同名 `.txt`。需要复现录制时姿态时，请使用前面的 `auto_aim_test` 配对回放入口。
+这种方式不需要 USB IMU。默认查找视频同名 `.txt`（每行 `时间戳秒 w x y z`），也可通过 `video_pose_path` 指定姿态文件；无同名文件时记录日志并固定云台水平，仅用于流程调试。显式指定的文件缺失或格式错误会报错。若姿态比图像先结束，只回放共有帧并提示忽略未配对尾部，循环时两者同步重开，不会静默换成假姿态。
+
+`video_fps` 只控制观看速度。检测、跟踪和预测使用录制时间戳；无配套文件时使用视频原始帧率生成时间戳。因此降低播放速度不会把目标运动速度同步改慢，也不会仅因 10 FPS 播放就每帧触发超时。配套文件中真实存在的大时间间隔仍会触发跟踪重置。回放应使用与录制设备一致的相机标定和 IMU 安装参数。
+
+仓库自带录像来自原版硬件，不能搭配当前实机的 DM-IMU 安装矩阵和新相机标定。`configs/demo_video_calibration.yaml` 保存原录像的五项几何参数：内参、畸变、相机到云台旋转和平移、IMU 安装旋转。`standard`、`Solver` 在视频模式下读取同一个文件，RViz 的相机 TF 也使用该标定。主配置中的实机标定数值保持原样，切回工业相机后不使用录像标定文件。
+
+更换录像时应同步更换 `video_calibration_path`；自己的录像若与当前实机标定一致，可将该项留空。仅替换 `.txt` 四元数而保留另一台设备的安装矩阵，会导致明显的虚假 roll 和错误的装甲板重投影。
 
 ### RViz2 三维显示
 
@@ -291,7 +315,7 @@ RM27/
 ## 当前使用边界
 
 - 当前新增硬件链路和调试界面主要围绕 `standard`；其他兵种、MPC 和能量机关入口需要按设备分别验证。
-- `configs/demo.yaml` 中的内外参、枪口偏移与 IMU 安装矩阵属于已有设备示例，不能直接视为新机器人的标定结果。
+- `configs/demo.yaml` 中的内外参、角度补偿与 IMU 安装矩阵属于已有设备示例，不能直接视为新机器人的标定结果。
 - `small_gyro_fire_yaw_thresh`、`fire_window_yaw_thresh_deg`、`fire_window_pitch_thresh_deg` 当前虽被读取，但未用于 `Shooter::shoot` 的开火判断；不能通过调这些值启用预测过枪线开火。
 - macOS 包含视频调试所需的兼容处理，不提供本仓库 Linux 工业相机/CAN SDK 的实机能力。
 - 本仓库尚未在本文提供同条件命中率、击杀时间或帧率对照数据。原项目 README 中的比赛成绩属于原项目，不能作为本版本的测试结论。

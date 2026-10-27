@@ -106,7 +106,7 @@ make -C build -j$(nproc)
 
 ### 3. 接相机但无 CAN（仅测视觉，不发下位机）
 
-若只有相机、没有 CAN/下位机，可在配置中关闭 CAN，用默认云台姿态跑自瞄（不发送控制量）：
+若只有相机、没有 CAN/下位机，可在配置中关闭 CAN（不发送控制量）。工业相机模式仍需要 USB DM-IMU；没有 IMU 时请使用视频回放模式：
 
 在 YAML 的 cboard 段添加或取消注释：
 
@@ -120,7 +120,7 @@ can_disabled: true
 ./build/standard configs/你的配置.yaml
 ```
 
-- 不会出现 “Error getting interface index!” 或卡在 “Waiting for q...”；云台姿态用单位四元数，不向 CAN 发数据。
+- 不会等待 CAN 四元数或向 CAN 发数据。`camera_name: video` 时不打开 USB IMU，优先使用同名 `.txt` 录制姿态，无配套文件时固定云台水平。
 
 ### 4. 接相机 + 下位机（实机自瞄）
 

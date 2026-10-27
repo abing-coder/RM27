@@ -9,6 +9,7 @@
 #include "io/cboard.hpp"
 #include "io/command.hpp"
 #include "target.hpp"
+#include "tools/barrel_ballistics.hpp"
 
 namespace auto_aim
 {
@@ -22,11 +23,19 @@ struct AimPoint
 class Aimer
 {
 public:
-  AimPoint debug_aim_point;
+  AimPoint debug_aim_point{false, Eigen::Vector4d::Zero()};
+  tools::BarrelSolution debug_ballistics;
   explicit Aimer(const std::string & config_path);
+  const Eigen::Vector3d & barrel_translation() const;
+  Eigen::Vector3d barrel_position(const Eigen::Matrix3d & R_gimbal2world) const;
+  // 旧接口按 roll=0 求解；实际姿态已知时应使用下面带旋转矩阵的重载。
   io::Command aim(
     std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
     bool to_now = true);
+
+  io::Command aim(
+    std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
+    const Eigen::Matrix3d & R_gimbal2world, bool to_now = true);
 
   io::Command aim(
     std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
@@ -43,6 +52,11 @@ private:
   double low_speed_delay_time_;
   double decision_speed_;
   double default_bullet_speed_;
+  Eigen::Vector3d t_barrel2gimbal_ = Eigen::Vector3d::Zero();
+
+  io::Command aim_impl(
+    std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
+    const Eigen::Matrix3d & R_gimbal2world, bool to_now, double yaw_offset);
 
   AimPoint choose_aim_point(const Target & target);
 };

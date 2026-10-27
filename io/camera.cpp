@@ -21,7 +21,8 @@ Camera::Camera(const std::string & config_path)
     auto video_path = tools::read<std::string>(yaml, "video_path");
     double video_fps = yaml["video_fps"] ? yaml["video_fps"].as<double>() : 0.0;
     bool video_loop = yaml["video_loop"] ? yaml["video_loop"].as<bool>() : true;
-    camera_ = std::make_unique<VideoCamera>(video_path, video_fps, video_loop);
+    const auto pose_path = yaml["video_pose_path"] ? yaml["video_pose_path"].as<std::string>() : "";
+    camera_ = std::make_unique<VideoCamera>(video_path, video_fps, video_loop, pose_path);
     return;
   }
 
@@ -55,6 +56,12 @@ Camera::Camera(const std::string & config_path)
 void Camera::read(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp)
 {
   camera_->read(img, timestamp);
+}
+
+std::optional<Eigen::Quaterniond> Camera::recorded_attitude() const
+{
+  const auto * video = dynamic_cast<const VideoCamera *>(camera_.get());
+  return video ? video->recorded_attitude() : std::nullopt;
 }
 
 }  // namespace io

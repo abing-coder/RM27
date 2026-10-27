@@ -22,9 +22,11 @@ public:
 
   Shooter(const std::string & config_path);
 
+  // command 为世界角（度，yaw 左转正、pitch 抬头正）；delta_command 为下发角差。
   bool shoot(
     const io::Command & command, const auto_aim::Aimer & aimer,
-    const std::list<auto_aim::Target> & targets, const Eigen::Vector3d & gimbal_pos);
+    const std::list<auto_aim::Target> & targets, const Eigen::Vector3d & gimbal_pos,
+    std::optional<io::Command> delta_command = std::nullopt);
 
   void reset_debug_state();
 

@@ -3,11 +3,12 @@
 #include <yaml-cpp/yaml.h>
 
 #include <cmath>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
-#include "tools/trajectory.hpp"
 
 namespace auto_aim
 {
@@ -23,6 +24,14 @@ Aimer::Aimer(const std::string & config_path)
   low_speed_delay_time_ = yaml["low_speed_delay_time"].as<double>();
   decision_speed_ = yaml["decision_speed"].as<double>();
   default_bullet_speed_ = yaml["bullet_speed"] ? yaml["bullet_speed"].as<double>() : 22.0;
+  if (yaml["t_barrel2gimbal"]) {
+    const auto t = yaml["t_barrel2gimbal"].as<std::vector<double>>();
+    if (t.size() != 3) throw std::runtime_error("t_barrel2gimbal 必须包含 3 个数，单位米");
+    t_barrel2gimbal_ = {t[0], t[1], t[2]};
+    if (!t_barrel2gimbal_.allFinite()) {
+      throw std::runtime_error("t_barrel2gimbal 必须是有限数值");
+    }
+  }
   if (yaml["left_yaw_offset"].IsDefined() && yaml["right_yaw_offset"].IsDefined()) {
     left_yaw_offset_ = yaml["left_yaw_offset"].as<double>() / 57.3;    // degree to rad
     right_yaw_offset_ = yaml["right_yaw_offset"].as<double>() / 57.3;  // degree to rad
@@ -30,14 +39,39 @@ Aimer::Aimer(const std::string & config_path)
   }
 }
 
+const Eigen::Vector3d & Aimer::barrel_translation() const { return t_barrel2gimbal_; }
+
+Eigen::Vector3d Aimer::barrel_position(const Eigen::Matrix3d & R_gimbal2world) const
+{
+  return R_gimbal2world * t_barrel2gimbal_;
+}
+
 io::Command Aimer::aim(
   std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
   bool to_now)
 {
+  return aim_impl(
+    std::move(targets), timestamp, bullet_speed, Eigen::Matrix3d::Identity(), to_now, yaw_offset_);
+}
+
+io::Command Aimer::aim(
+  std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
+  const Eigen::Matrix3d & R_gimbal2world, bool to_now)
+{
+  return aim_impl(
+    std::move(targets), timestamp, bullet_speed, R_gimbal2world, to_now, yaw_offset_);
+}
+
+io::Command Aimer::aim_impl(
+  std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
+  const Eigen::Matrix3d & R_gimbal2world, bool to_now, double yaw_offset)
+{
+  debug_aim_point = {false, Eigen::Vector4d::Zero()};
+  debug_ballistics = {};
+  if (!R_gimbal2world.allFinite()) return {false, false, 0, 0};
   if (targets.empty()) return {false, false, 0, 0};
   auto target = targets.front();
 
-  auto ekf = target.ekf();
   double delay_time =
     target.ekf_x()[7] > decision_speed_ ? high_speed_delay_time_ : low_speed_delay_time_;
 
@@ -66,61 +100,49 @@ io::Command Aimer::aim(
     return {false, false, 0, 0};
   }
 
-  Eigen::Vector3d xyz0 = aim_point0.xyza.head(3);
-  auto d0 = std::sqrt(xyz0[0] * xyz0[0] + xyz0[1] * xyz0[1]);
-  tools::Trajectory trajectory0(bullet_speed, d0, xyz0[2]);
-  if (trajectory0.unsolvable) {
-    tools::logger()->debug(
-      "[Aimer] Unsolvable trajectory0: {:.2f} {:.2f} {:.2f}", bullet_speed, d0, xyz0[2]);
+  // 目标姿态的 yaw/pitch 由弹道求解，roll 沿用当前 IMU 姿态。
+  const double roll = tools::eulers(R_gimbal2world, 2, 1, 0)[2];
+  auto solve_point = [&](const AimPoint & point) {
+    return tools::solve_barrel_ballistics(
+      point.xyza.head(3), t_barrel2gimbal_, roll, bullet_speed, yaw_offset, pitch_offset_);
+  };
+  const auto initial_solution = solve_point(aim_point0);
+  if (!initial_solution.valid) {
     debug_aim_point.valid = false;
     return {false, false, 0, 0};
   }
 
-  // 迭代求解飞行时间 (最多10次，收敛条件：相邻两次fly_time差 <0.001)
-  bool converged = false;
-  double prev_fly_time = trajectory0.fly_time;
-  tools::Trajectory current_traj = trajectory0;
-  std::vector<Target> iteration_target(10, target);  // 创建10个目标副本用于迭代预测
+  // 飞行时间来自同一个枪口模型；每次都从发弹时刻的目标副本向后预测。
+  double prev_fly_time = initial_solution.fly_time;
 
-  for (int iter = 0; iter < 10; ++iter) {
+  for (int iter = 0; iter < 20; ++iter) {
     // 预测目标在 future + prev_fly_time 时刻的位置
     auto predict_time = future + std::chrono::microseconds(static_cast<int>(prev_fly_time * 1e6));
-    iteration_target[iter].predict(predict_time);
+    auto predicted_target = target;
+    predicted_target.predict(predict_time);
 
     // 计算瞄准点
-    auto aim_point = choose_aim_point(iteration_target[iter]);
+    auto aim_point = choose_aim_point(predicted_target);
     debug_aim_point = aim_point;
     if (!aim_point.valid) {
       return {false, false, 0, 0};
     }
 
-    // 计算新弹道
-    Eigen::Vector3d xyz = aim_point.xyza.head(3);
-    double d = std::sqrt(xyz.x() * xyz.x() + xyz.y() * xyz.y());
-    current_traj = tools::Trajectory(bullet_speed, d, xyz.z());
-
-    // 检查弹道是否可解
-    if (current_traj.unsolvable) {
-      tools::logger()->debug(
-        "[Aimer] Unsolvable trajectory in iter {}: speed={:.2f}, d={:.2f}, z={:.2f}", iter + 1,
-        bullet_speed, d, xyz.z());
+    const auto solution = solve_point(aim_point);
+    if (!solution.valid) {
       debug_aim_point.valid = false;
       return {false, false, 0, 0};
     }
 
-    // 检查收敛条件
-    if (std::abs(current_traj.fly_time - prev_fly_time) < 0.001) {
-      converged = true;
-      break;
+    if (std::abs(solution.fly_time - prev_fly_time) < 1e-5) {
+      debug_ballistics = solution;
+      return {true, false, solution.yaw, solution.pitch};
     }
-    prev_fly_time = current_traj.fly_time;
+    prev_fly_time = solution.fly_time;
   }
 
-  // 计算最终角度
-  Eigen::Vector3d final_xyz = debug_aim_point.xyza.head(3);
-  double yaw = std::atan2(final_xyz.y(), final_xyz.x()) + yaw_offset_;
-  double pitch = -(current_traj.pitch + pitch_offset_);  //世界坐标系下pitch向上为负
-  return {true, false, yaw, pitch};
+  debug_aim_point.valid = false;
+  return {false, false, 0, 0};
 }
 
 io::Command Aimer::aim(
@@ -136,10 +158,8 @@ io::Command Aimer::aim(
     yaw_offset = yaw_offset_;
   }
 
-  auto command = aim(targets, timestamp, bullet_speed, to_now);
-  command.yaw = command.yaw - yaw_offset_ + yaw_offset;
-
-  return command;
+  return aim_impl(
+    std::move(targets), timestamp, bullet_speed, Eigen::Matrix3d::Identity(), to_now, yaw_offset);
 }
 
 AimPoint Aimer::choose_aim_point(const Target & target)

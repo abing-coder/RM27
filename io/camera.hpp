@@ -2,7 +2,9 @@
 #define IO__CAMERA_HPP
 
 #include <chrono>
+#include <Eigen/Geometry>
 #include <memory>
+#include <optional>
 #include <opencv2/opencv.hpp>
 #include <string>
 
@@ -20,6 +22,8 @@ class Camera
 public:
   Camera(const std::string & config_path);
   void read(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp);
+  // 视频当前帧对应的录制 IMU 四元数；工业相机或无配套数据时返回空。
+  std::optional<Eigen::Quaterniond> recorded_attitude() const;
 
 private:
   std::unique_ptr<CameraBase> camera_;

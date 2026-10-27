@@ -91,7 +91,7 @@ int main(int argc, char * argv[])
     auto targets = tracker.track(armors, timestamp);
 
     auto aimer_start = std::chrono::steady_clock::now();
-    auto command = aimer.aim(targets, timestamp, 27, false);
+    auto command = aimer.aim(targets, timestamp, 27, solver.R_gimbal2world(), false);
 
     if (
       !targets.empty() && aimer.debug_aim_point.valid &&
