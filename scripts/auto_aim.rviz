@@ -1,0 +1,59 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Cell Size: 0.5
+      Plane Cell Count: 20
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Show Arrows: false
+      Show Axes: true
+      Show Names: true
+      Marker Scale: 0.6
+      Frame Timeout: 2
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: AutoAimMarkers
+      Namespaces:
+        auto_aim: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /auto_aim/markers
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 30; 30; 40
+    Fixed Frame: world
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 6
+      Focal Point:
+        X: 2
+        Y: 0
+        Z: 0
+      Name: Current View
+      Pitch: 0.5
+      Yaw: 3.14
+    Saved: ~
+Window Geometry:
+  Height: 800
+  Width: 1200

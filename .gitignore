@@ -4,6 +4,8 @@ build/
 Camera/
 logs/
 assets/img_with_q/
+calib_chessboard/data/
+calib_chessboard/output/
 records/
 records_auto_buff_big/
 records_new/

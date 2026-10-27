@@ -69,8 +69,10 @@ Eigen::Matrix3d Solver::R_gimbal2world() const { return R_gimbal2world_; }
 
 void Solver::set_R_gimbal2world(const Eigen::Quaterniond & q)
 {
+  // q 是 IMU 机体到重力系（Z 朝上）。R_gimbal2imubody 只描述安装：v_imu = R * v_gimbal。
+  // 不能再左右同乘，否则世界系的“上”会跟着安装方向歪掉。
   Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
-  R_gimbal2world_ = R_gimbal2imubody_.transpose() * R_imubody2imuabs * R_gimbal2imubody_;
+  R_gimbal2world_ = R_imubody2imuabs * R_gimbal2imubody_;
 }
 
 //solvePnP（获得姿态）
