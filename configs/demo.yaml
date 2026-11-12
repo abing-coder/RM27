@@ -40,8 +40,8 @@ max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
 
 #####-----aimer参数-----#####
-yaw_offset: -1 # degree -2.5
-pitch_offset: -1.4 # degree 2
+yaw_offset: 0 # degree -2.5
+pitch_offset: -1 # degree 2
 comming_angle: 60 # degree
 leaving_angle: 20 # degree
 decision_speed: 8 # rad/s
@@ -50,8 +50,8 @@ low_speed_delay_time: 0.015 # s
 small_gyro_speed_thresh: 2.5 # rad/s，小陀螺判定阈值
 
 #####-----shooter参数-----#####
-first_tolerance: 3 # 近距离射击容差，degree
-second_tolerance: 2 # 远距离射击容差，degree
+first_tolerance: 2.7 # 近距离射击容差，degree,原始数据是3
+second_tolerance: 2 # 远距离射击容差，degree，原始数据是2
 small_gyro_fire_yaw_thresh: 6.0 # degree，小陀螺预测装甲板过枪线开火阈值
 fire_window_yaw_thresh_deg: 1.5   # degree，普通目标：预测装甲板进入枪线的 yaw 窗口
 fire_window_pitch_thresh_deg: 2.0 # degree，普通目标：预测装甲板进入枪线的 pitch 窗口
@@ -79,17 +79,19 @@ vid_pid: "2bdf:0001"
 R_gimbal2imubody: [0, 0, -1, -1, 0, 0, 0, 1, 0]
 
 # 重投影误差: 0.2697px
-camera_matrix: [2311.5993367383635, 0, 723.9872265844291, 0, 2313.4190846433244, 567.81727322759843, 0, 0, 1]
-distort_coeffs: [-0.084181060859895157, 0.12492053118405488, 0.0032697198677200407, -0.0009288168092028401, 0]
+camera_matrix: [2334.3100677892139, 0, 722.62133349286796, 0, 2335.8999103578203, 534.62083305548731, 0, 0, 1]
+distort_coeffs: [-0.080008805450534709, 0.085675034453367591, 0.0027903039462225331, -0.0007315334877910064, 0]
 
 # 相机同理想情况的偏角: yaw0.46 pitch0.61 roll-1.53 degree
-R_camera2gimbal: [0.080124051169054855, 0.049856199072306449, 0.99553729002901814, -0.99587801146420585, 0.046597921825050737, 0.077817864039599074, -0.042510265893755027, -0.99766877925273834, 0.053384306663974312]
-t_camera2gimbal: [0.14876008166428353, -0.032417315284725086, -0.0013848821415997162]
+R_camera2gimbal: [0.0039766068118225473, 0.043148478876036463, 0.99906075659538762, -0.99938384196548558, 0.035012233655760783, 0.0024657479067457873, -0.034872955374750991, -0.99845498259316556, 0.043261122480952707]
+t_camera2gimbal: [0.15386088922062299, -0.043685431736964757, 0.017126923246337338]
+
 
 # 枪口发射点在云台坐标系中的位置，单位米，顺序为前、左、上。
 # 必须相对手眼标定采用的云台原点测量；零表示暂按发射点与云台原点重合。
 # 枪口参考轴向与云台一致，方向残差仍使用原版 yaw_offset、pitch_offset 校正。
-t_barrel2gimbal: [0.0, 0.0, 0.0]
+# t_barrel2gimbal: [0.1, 0.1, 0.008]
+t_barrel2gimbal: [0.119887, 0.000296, 0.005191]
 
 #####-----自瞄输出模式-----#####
 aim_mode: "absolute"     # "delta" = yaw 用预测像点差值，pitch 用 detector 裸测量点做弹道；"absolute" = 世界系预测+弹道，再减去 IMU 当前云台角
@@ -100,9 +102,9 @@ dm_imu_port: "/dev/ttyACM0"
 #####-----cboard参数-----#####
 can_disabled: false   # 无 CAN 时 true；接上达妙后改为 false
 can_send_only: true    # 仅上位机发送给电控，不等待四元数/弹速等反馈（单向通信）
-can_send_hz: 100.0     # CAN 发送频率（Hz），0 或缺失=按图像帧率发送
+can_send_hz: 200.0     # CAN 发送频率（Hz），0 或缺失=按图像帧率发送
 quaternion_canid: 0x100
-bullet_speed: 22          
+bullet_speed: 20           
 bullet_speed_canid: 0x101
 send_canid: 0x520
 # "damiao" = 达妙 SDK 直连 DM-USB2FDCAN，无需 slcand；否则填 SocketCAN 接口名如 can0/slcan0

@@ -2,3 +2,7 @@ inner_corners_cols: 7
 inner_corners_rows: 7
 square_size_mm: 20
 use_imu: false
+camera_name: hikrobot
+image_width: 1440
+image_height: 1080
+R_gimbal2imubody: [0, 0, -1, -1, 0, 0, 0, 1, 0]

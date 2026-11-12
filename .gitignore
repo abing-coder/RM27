@@ -6,6 +6,7 @@ logs/
 assets/img_with_q/
 calib_chessboard/data/
 calib_chessboard/output/
+calib_chessboard/archive/
 records/
 records_auto_buff_big/
 records_new/

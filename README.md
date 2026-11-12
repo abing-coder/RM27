@@ -206,14 +206,31 @@ cmake --build build --target barrel_aim_test -j2
 先修改 [`calib_chessboard/config.yaml`](calib_chessboard/config.yaml)：填写棋盘格**内角点**行列数、相邻角点间距（毫米）、相机参数及 IMU 安装旋转。换相机、镜头、采集分辨率或安装位置后，应重新完成对应标定。
 
 ```bash
-# 第一步：只标内参；不读 IMU，移动棋盘以覆盖不同位置、距离与倾角
+# 第一步：重新标内参；自动归档旧数据，不读 IMU，移动棋盘
 ./calib_chessboard/run.sh intra
 
-# 第二步：只标手眼；固定棋盘，转动云台，姿态来自 USB IMU
+# 第二步：重新标手眼；自动归档旧数据，固定棋盘，转动云台
 ./calib_chessboard/run.sh hand
+
+# 中途退出后继续采集（设备、镜头、棋盘及安装条件必须保持一致）
+./calib_chessboard/run.sh intra --resume
+./calib_chessboard/run.sh hand --resume
+
+# 只用已有图片重新计算，不打开相机或 IMU；可先移出误差大的图片
+./calib_chessboard/run.sh intra --reuse
+./calib_chessboard/run.sh hand --reuse
+
+# 离线重算，不显示窗口
+./calib_chessboard/run.sh intra --reuse --headless
 ```
 
-采集窗口会提示覆盖情况；开启自动采集后，满足相应条件即可保存。`s` 手动保存，满足采集要求后按 `c` 开始计算，`q` 结束采集。手眼采集应在云台停稳后进行，并包含足够的 yaw/pitch 姿态变化。
+**重复标定直接再次运行相同命令即可，无需手动删文件。**默认在相机成功读到第一帧后，把上一次的图片、姿态、采集信息和结果副本归档到 `calib_chessboard/archive/data_intrinsics_时间/` 或 `data_handeye_时间/`，本轮从第 1 张重新采集；上一版结果在新标定成功前仍保留。替换结果时还会备份到结果目录的 `history/`。内参和手眼的采集目录互不影响。
+
+采集窗口会提示覆盖情况；开启自动采集后，满足条件和保存间隔即可保存。`s` 手动保存，手眼仍需先停稳；`c` 开始计算；`q` / Esc 退出并保留已采图片，不自动计算，可稍后 `--resume`。手眼采集应包含足够的 yaw/pitch 姿态变化。手眼 `--resume` 还要求棋盘相对世界不动、IMU 参考系未重置；条件改变时请直接重新标定。
+
+预览使用 `capture.live_detection_width` 限制实时检测宽度，减少卡顿；棋盘太小或倾角较大而检测不到时，可增大至 960 / 1440，或设为 0 使用原尺寸。保存的始终是原图，最终求解仍使用原图高精度角点。程序会打印整体 RMS 和明显偏大的逐图误差，并在手眼结果中记录固定棋盘的世界位姿一致性；这些指标不能替代独立精度验证。
+
+脚本独立编译标定工具到 `build/calib-tool/`，不依赖 OpenVINO、ROS 或 CAN SDK。`SKIP_BUILD=1` 可在编译完成后跳过构建。使用 `--help` 查看选项，也可加 `--data-dir=目录`、`--output=结果.yaml`、`--intrinsics=内参.yaml`；可从任意工作目录调用脚本，但这些数据路径仍相对仓库根目录。二进制直接调用时对应 `--mode=intra|hand`、`--session=new|resume|reuse`。
 
 | 内容 | 默认位置 |
 | --- | --- |
@@ -222,9 +239,9 @@ cmake --build build --target barrel_aim_test -j2
 | 内参结果 | `calib_chessboard/output/intrinsics.yaml` |
 | 手眼结果 | `calib_chessboard/output/handeye.yaml` |
 
-仓库中的采集样例用于参考。新设备标定应使用本机重新采集的数据；开始前可将样例目录移到其他位置备份，避免混用不同安装条件的样本。
+仓库中的采集样例用于参考。新设备标定应使用本机重新采集的数据；默认新建采集会自动归档样例，避免混用。继续采集会核对已记录的棋盘规格、相机类型、图像尺寸和 IMU 安装矩阵；旧样例若缺少相应信息，仍需人工确认设备条件。图片编号允许断号，重算会扫描全部数字编号图片，继续采集也不会复用已有姿态文件的编号。
 
-`hand` 模式优先读取上述 `intrinsics.yaml`，缺失时会尝试 `configs/demo.yaml` 和标定配置中的内参。因此，应先生成当前设备的内参结果再做手眼。`intra` / `hand` 模式会清空自动导出目标设置，**结果不会自动覆盖机器人配置**，需要把以下四项复制到实际运行的 YAML：
+`hand` 模式默认读取上述 `intrinsics.yaml`，缺失时仅尝试当前标定配置中的内参，不再静默使用 `configs/demo.yaml` 的示例值。可用 `--intrinsics=路径` 明确选择；显式指定的文件无效时直接报错。应先生成当前设备的内参再做手眼。`intra` / `hand` 模式会清空自动导出目标设置，**结果不会自动覆盖机器人配置**，需要把以下四项复制到实际运行的 YAML：
 
 ```text
 camera_matrix

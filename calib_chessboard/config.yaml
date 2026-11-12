@@ -32,12 +32,13 @@ export_to: ""
 capture:
   min_frames: 15             # 建议至少这么多张（远近、左右、俯仰都要有）
   preview_scale: 0.5         # 预览缩放
+  live_detection_width: 720  # 实时检测宽度上限，0=原尺寸；最终求解始终用原图高精度检测
   require_board: true        # 未检测到棋盘格时拒绝保存
   auto_save: true            # true=和 ROS 一样，姿态够新就自动收图，不用一直按 s
   auto_save_interval_s: 1.5
   auto_min_corner_shift_px: 40
   handeye_still_s: 0.5       # 手眼：云台静止这么久才自动收图（避免边转边拍）
-  handeye_still_deg: 0.2     # 手眼：静止判定，相邻帧 yaw/pitch 变化小于此值
+  handeye_still_deg: 0.2     # 手眼：静止窗口内完整姿态相对基准的最大变化（含 roll）
   show_each: false           # true=内参时逐张暂停；标定请保持 false，按一次 C 就会自动算完
 
 

@@ -21,6 +21,7 @@
 
 #include "io/camera.hpp"
 #include "io/dm_imu/dm_imu.hpp"
+#include "calib_chessboard/session.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
@@ -31,7 +32,19 @@ using Clock = std::chrono::steady_clock;
 const std::string keys =
   "{help h usage ? |                                | 输出命令行参数说明}"
   "{mode           |                                | intra=只标内参  hand=只标手眼}"
+  "{session        | new                            | new=归档重采 resume=继续采集 reuse=只重新计算}"
+  "{data-dir       |                                | 覆盖采集数据目录}"
+  "{output         |                                | 覆盖结果文件路径}"
+  "{intrinsics     | calib_chessboard/output/intrinsics.yaml | 手眼使用的内参文件}"
+  "{headless       |                                | 离线计算时不显示窗口，需 session=reuse}"
   "{@config-path   | calib_chessboard/config.yaml   | yaml 配置文件路径 }";
+
+bool headless = false;
+
+int wait_key(int delay)
+{
+  return headless ? -1 : cv::waitKey(delay);
+}
 
 // ---------------------------------------------------------------------------
 struct Config
@@ -55,6 +68,7 @@ struct Config
 
   int min_frames = 15;
   double preview_scale = 0.5;
+  int live_detection_width = 720;
   bool require_board = true;
   bool auto_save = false;
   double auto_save_interval_s = 1.5;
@@ -107,6 +121,7 @@ Config load_config(const std::string & path)
   auto cap = yaml["capture"];
   c.min_frames = yaml_get(cap, "min_frames", 15);
   c.preview_scale = yaml_get(cap, "preview_scale", 0.5);
+  c.live_detection_width = yaml_get(cap, "live_detection_width", 720);
   c.require_board = yaml_get(cap, "require_board", true);
   c.auto_save = yaml_get(cap, "auto_save", false);
   c.auto_save_interval_s = yaml_get(cap, "auto_save_interval_s", 1.5);
@@ -129,6 +144,13 @@ Config load_config(const std::string & path)
     c.R_gimbal2imubody = yaml["R_gimbal2imubody"].as<std::vector<double>>();
   if (c.R_gimbal2imubody.size() != 9)
     throw std::runtime_error("R_gimbal2imubody 必须是 9 个数（行优先 3x3）");
+  if (c.cols < 2 || c.rows < 2 || !std::isfinite(c.square_mm) || c.square_mm <= 0 ||
+      c.live_detection_width < 0 || !std::isfinite(c.preview_scale) || c.preview_scale <= 0 ||
+      !std::isfinite(c.auto_save_interval_s) || c.auto_save_interval_s < 0 ||
+      !std::isfinite(c.auto_min_corner_shift_px) || c.auto_min_corner_shift_px < 0 ||
+      !std::isfinite(c.handeye_still_s) || c.handeye_still_s <= 0 ||
+      !std::isfinite(c.handeye_still_deg) || c.handeye_still_deg <= 0)
+    throw std::runtime_error("棋盘尺寸、预览尺寸或采样参数无效，请检查配置");
 
   return c;
 }
@@ -182,6 +204,39 @@ bool detect_chessboard(
     }
   }
   return ok && static_cast<int>(corners.size()) == c.cols * c.rows;
+}
+
+// Live corners guide sampling only. The solver re-detects saved original images
+// with the full precision detector above, so preview scaling never changes K/D.
+bool detect_live_chessboard(
+  const cv::Mat & img, const Config & c, std::vector<cv::Point2f> & corners)
+{
+  cv::Mat gray;
+  if (img.channels() == 3)
+    cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+  else if (img.channels() == 4)
+    cv::cvtColor(img, gray, cv::COLOR_BGRA2GRAY);
+  else
+    gray = img;
+  cv::Mat small = gray;
+  if (c.live_detection_width > 0 && gray.cols > c.live_detection_width) {
+    const double scale = static_cast<double>(c.live_detection_width) / gray.cols;
+    cv::resize(gray, small, {}, scale, scale, cv::INTER_AREA);
+  }
+  corners.clear();
+  const bool found = c.detector == "classic"
+    ? cv::findChessboardCorners(
+        small, pattern_size(c), corners,
+        cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK)
+    : cv::findChessboardCornersSB(small, pattern_size(c), corners, 0);
+  if (!found || static_cast<int>(corners.size()) != c.cols * c.rows) return false;
+  const float sx = static_cast<float>(gray.cols) / small.cols;
+  const float sy = static_cast<float>(gray.rows) / small.rows;
+  for (auto & pt : corners) {
+    pt.x = (pt.x + 0.5f) * sx - 0.5f;
+    pt.y = (pt.y + 0.5f) * sy - 0.5f;
+  }
+  return true;
 }
 
 const char * kCalibWin = "chessboard calib";
@@ -248,13 +303,16 @@ struct RosSampler
   std::vector<RosParam> db;
   const double min_dist = 0.2;
 
+  bool is_new(const RosParam & p) const
+  {
+    for (const auto & q : db)
+      if (ros_param_dist(p, q) <= min_dist) return false;
+    return true;
+  }
+
   bool add_if_new(const RosParam & p, bool force)
   {
-    if (!force && !db.empty()) {
-      double best = 1e9;
-      for (const auto & q : db) best = std::min(best, ros_param_dist(p, q));
-      if (best <= min_dist) return false;
-    }
+    if (!force && !is_new(p)) return false;
     db.push_back(p);
     return true;
   }
@@ -682,6 +740,7 @@ cv::Mat ProgressBoard::render(int height) const
 
 void ProgressBoard::show(const cv::Mat * camera) const
 {
+  if (headless) return;
   cv::Mat panel;
   if (camera && !camera->empty()) {
     cv::Mat cam = to_bgr(*camera);
@@ -716,33 +775,25 @@ void draw_camera_hud(
   tools::draw_text(vis, next, {16, vis.rows - 16}, {0, 255, 255}, 0.75, 2);
 }
 
-int next_index(const fs::path & dir)
-{
-  int i = 1;
-  while (fs::exists(dir / fmt::format("{}.jpg", i))) ++i;
-  return i;
-}
-
-int count_images(const fs::path & dir)
-{
-  int n = 0;
-  for (int i = 1; fs::exists(dir / fmt::format("{}.jpg", i)); ++i) ++n;
-  return n;
-}
-
 void write_q(const fs::path & path, const Eigen::Quaterniond & q)
 {
   Eigen::Vector4d xyzw = q.coeffs();  // x y z w
   std::ofstream f(path);
   f << fmt::format("{} {} {} {}", xyzw[3], xyzw[0], xyzw[1], xyzw[2]);
+  f.close();
+  if (!f) throw std::runtime_error("保存四元数失败: " + path.string());
 }
 
 Eigen::Quaterniond read_q(const fs::path & path)
 {
   std::ifstream f(path);
-  double w = 1, x = 0, y = 0, z = 0;
-  f >> w >> x >> y >> z;
-  return {w, x, y, z};
+  double w, x, y, z;
+  if (!(f >> w >> x >> y >> z))
+    throw std::runtime_error("四元数文件无效: " + path.string());
+  Eigen::Quaterniond q(w, x, y, z);
+  if (!q.coeffs().allFinite() || q.norm() < 1e-6)
+    throw std::runtime_error("四元数数值无效: " + path.string());
+  return q.normalized();
 }
 
 Eigen::Matrix3d gimbal2world(const Eigen::Quaterniond & q, const Config & c)
@@ -800,7 +851,38 @@ bool open_grabber(FrameGrabber & g, const Config & c)
   }
 }
 
-void write_capture_info(const Config & c)
+void validate_capture_info(const Config & c, cv::Size size = {})
+{
+  const auto path = fs::path(c.data_dir) / "capture_info.yaml";
+  if (!fs::exists(path)) {
+    if (!chessboard::sample_ids(c.data_dir).empty())
+      tools::logger()->warn("旧数据没有 capture_info.yaml，请确认棋盘和设备与当前配置一致");
+    return;
+  }
+  const auto info = YAML::LoadFile(path.string());
+  auto mismatch = [&](const char * key) {
+    throw std::runtime_error(
+      std::string("旧数据的 ") + key + " 与当前配置不同，请使用默认新建采集，勿继续混用");
+  };
+  if (info["inner_corners_cols"] && info["inner_corners_cols"].as<int>() != c.cols)
+    mismatch("inner_corners_cols");
+  if (info["inner_corners_rows"] && info["inner_corners_rows"].as<int>() != c.rows)
+    mismatch("inner_corners_rows");
+  if (info["square_size_mm"] &&
+      std::abs(info["square_size_mm"].as<double>() - c.square_mm) > 1e-4)
+    mismatch("square_size_mm");
+  if (info["use_imu"] && info["use_imu"].as<bool>() != c.use_imu) mismatch("use_imu");
+  if (info["camera_name"] && info["camera_name"].as<std::string>() != c.camera_name)
+    mismatch("camera_name");
+  if (c.use_imu && info["R_gimbal2imubody"] &&
+      info["R_gimbal2imubody"].as<std::vector<double>>() != c.R_gimbal2imubody)
+    mismatch("R_gimbal2imubody");
+  if (size.area() > 0 && info["image_width"] && info["image_height"] &&
+      (info["image_width"].as<int>() != size.width ||
+       info["image_height"].as<int>() != size.height)) mismatch("image size");
+}
+
+void write_capture_info(const Config & c, cv::Size size)
 {
   YAML::Emitter out;
   out << YAML::BeginMap;
@@ -808,66 +890,92 @@ void write_capture_info(const Config & c)
   out << YAML::Key << "inner_corners_rows" << YAML::Value << c.rows;
   out << YAML::Key << "square_size_mm" << YAML::Value << c.square_mm;
   out << YAML::Key << "use_imu" << YAML::Value << c.use_imu;
+  out << YAML::Key << "camera_name" << YAML::Value << c.camera_name;
+  out << YAML::Key << "image_width" << YAML::Value << size.width;
+  out << YAML::Key << "image_height" << YAML::Value << size.height;
+  out << YAML::Key << "R_gimbal2imubody" << YAML::Value << YAML::Flow << c.R_gimbal2imubody;
   out << YAML::EndMap;
   std::ofstream f(fs::path(c.data_dir) / "capture_info.yaml");
   f << out.c_str() << "\n";
+  f.close();
+  if (!f) throw std::runtime_error("写入采集信息失败: " + c.data_dir);
 }
 
-int capture_loop(const Config & c, io::DM_IMU * imu, ProgressBoard & pb)
+int capture_loop(
+  const Config & c, io::DM_IMU * imu, ProgressBoard & pb, const std::string & session)
 {
   FrameGrabber grabber;
   if (!open_grabber(grabber, c)) return -1;
 
+  // Do not move any previous files until a camera frame has actually arrived.
+  cv::Mat first;
+  Clock::time_point first_time;
+  if (!grabber.read(first, first_time)) return -1;
+  if (session == "new") {
+    const auto archive = chessboard::archive_session(c.data_dir, c.output_yaml, c.path);
+    if (!archive.empty()) tools::logger()->info("旧数据和结果已归档: {}", archive.string());
+  } else {
+    validate_capture_info(c, first.size());
+  }
   fs::create_directories(c.data_dir);
-  write_capture_info(c);
 
   RosSampler sampler;
-  int next = next_index(c.data_dir);
-  for (int i = 1; i < next; ++i) {
+  int next = chessboard::next_index(c.data_dir);
+  pb.hand_mode = imu != nullptr;
+  for (int i : chessboard::sample_ids(c.data_dir)) {
     auto path = fs::path(c.data_dir) / fmt::format("{}.jpg", i);
     cv::Mat old = cv::imread(path.string());
     if (old.empty()) continue;
+    if (old.size() != first.size()) throw std::runtime_error("旧图片分辨率与当前相机不同");
     std::vector<cv::Point2f> corners;
     RosParam p{};
-    if (detect_chessboard(old, c, corners) &&
-        ros_params(corners, old.size(), c.cols, c.rows, p))
+    if ((!detect_live_chessboard(old, c, corners) && !detect_chessboard(old, c, corners)) ||
+        !ros_params(corners, old.size(), c.cols, c.rows, p)) continue;
+    if (pb.hand_mode) {
+      const auto qpath = fs::path(c.data_dir) / fmt::format("{}.txt", i);
+      if (!fs::exists(qpath)) continue;
+      const Eigen::Vector3d ypr = tools::eulers(gimbal2world(read_q(qpath), c), 2, 1, 0) * 57.3;
+      pb.add_gimbal(ypr[0], ypr[1]);
+    } else {
       sampler.add_if_new(p, true);
+    }
   }
+  write_capture_info(c, first.size());
 
   pb.capture = StepState::Run;
   pb.need = c.min_frames;
   pb.imu = imu != nullptr;
-  pb.hand_mode = imu != nullptr;
-  if (pb.hand_mode) {
-    for (int i = 1; i < next; ++i) {
-      auto qpath = fs::path(c.data_dir) / fmt::format("{}.txt", i);
-      if (!fs::exists(qpath)) continue;
-      Eigen::Vector3d ypr = tools::eulers(gimbal2world(read_q(qpath), c), 2, 1, 0) * 57.3;
-      pb.add_gimbal(ypr[0], ypr[1]);
-    }
-  }
   pb.pull(sampler);
   pb.hint = pb.hand_mode ? pb.hand_hint(false) : next_action(false, sampler, pb.lo, pb.hi, pb.prog, pb.goodenough);
 
   tools::logger()->info(
-    pb.hand_mode ? "手眼：棋盘固定，按提示把黄圈转进灰框后停住，自动收图。C=计算，S=强制保存，Q=结束。已有 {} 张"
-                 : "内参：移动棋盘直到条变绿。自动收图，C=计算，S=强制保存，Q=结束。已有 {} 张",
+    pb.hand_mode ? "手眼：棋盘固定，黄圈进灰框后停稳自动收图。C=计算，S=手动保存，Q=退出保留。已有 {} 张"
+                 : "内参：移动棋盘直到条变绿。C=计算，S=手动保存，Q=退出保留。已有 {} 张",
     pb.hand_mode ? pb.gimbal_yp.size() : sampler.db.size());
 
   cv::namedWindow(kCalibWin, cv::WINDOW_NORMAL);
-  std::optional<Eigen::Vector3d> prev_ypr;
-  Clock::time_point still_since = Clock::now();
+  std::optional<Eigen::Quaterniond> still_anchor;
+  Clock::time_point still_since = first_time;
+  std::optional<Clock::time_point> last_saved;
+  std::vector<cv::Point2f> last_corners;
 
   while (true) {
     cv::Mat img;
     Clock::time_point t;
-    if (!grabber.read(img, t)) {
+    if (!first.empty()) {
+      img = first;
+      first.release();
+      t = first_time;
+    } else if (!grabber.read(img, t)) {
       tools::logger()->warn("读图失败");
       break;
     }
 
     std::vector<cv::Point2f> corners;
-    const bool found = detect_chessboard(img, c, corners);
+    const auto detection_start = Clock::now();
+    const bool found = detect_live_chessboard(img, c, corners);
+    const double detection_ms = std::chrono::duration<double, std::milli>(
+      Clock::now() - detection_start).count();
     const double bright = image_brightness(img);
 
     std::optional<Eigen::Vector3d> ypr;
@@ -876,9 +984,10 @@ int capture_loop(const Config & c, io::DM_IMU * imu, ProgressBoard & pb)
       q = imu->imu_at(t);
       Eigen::Vector3d ypr_rad = tools::eulers(gimbal2world(q, c), 2, 1, 0);
       ypr = ypr_rad * 57.3;
-      if (!prev_ypr || (*ypr - *prev_ypr).head<2>().cwiseAbs().maxCoeff() > c.handeye_still_deg)
+      if (!still_anchor || still_anchor->angularDistance(q) * 180.0 / CV_PI > c.handeye_still_deg) {
         still_since = t;
-      prev_ypr = ypr;
+        still_anchor = q;
+      }
     }
     const bool gimbal_still =
       !pb.hand_mode || std::chrono::duration<double>(t - still_since).count() >= c.handeye_still_s;
@@ -900,17 +1009,42 @@ int capture_loop(const Config & c, io::DM_IMU * imu, ProgressBoard & pb)
         tools::logger()->warn("未检测到棋盘格，未保存");
         return false;
       }
+      if (pb.hand_mode && !gimbal_still) {
+        if (force) tools::logger()->warn("云台尚未停稳，请停稳后保存");
+        return false;
+      }
+      if (!force && last_saved &&
+          std::chrono::duration<double>(t - *last_saved).count() < c.auto_save_interval_s)
+        return false;
       if (found && pb.live_ok) {
-        if (!pb.hand_mode && !sampler.add_if_new(p, force)) return false;
+        if (!pb.hand_mode && !force && !sampler.is_new(p)) return false;
         if (pb.hand_mode && !force && !pb.on_open_target()) return false;
+        if (!pb.hand_mode && !force && last_corners.size() == corners.size()) {
+          double shift = 0;
+          for (size_t i = 0; i < corners.size(); ++i)
+            shift += cv::norm(corners[i] - last_corners[i]);
+          if (shift / corners.size() < c.auto_min_corner_shift_px) return false;
+        }
       } else if (!force) {
         return false;
       }
       auto img_path = fs::path(c.data_dir) / fmt::format("{}.jpg", next);
-      cv::imwrite(img_path.string(), img);
-      if (imu) write_q(fs::path(c.data_dir) / fmt::format("{}.txt", next), q);
+      const auto q_path = fs::path(c.data_dir) / fmt::format("{}.txt", next);
+      if (fs::exists(img_path) || fs::exists(q_path))
+        throw std::runtime_error("样本编号已存在，未覆盖: " + img_path.string());
+      try {
+        if (!cv::imwrite(img_path.string(), img)) throw std::runtime_error("图片写入失败");
+        if (imu) write_q(q_path, q);
+      } catch (...) {
+        fs::remove(img_path);
+        fs::remove(q_path);
+        throw;
+      }
       ++next;
+      last_saved = t;
+      last_corners = corners;
       if (pb.hand_mode && ypr) pb.add_gimbal((*ypr)[0], (*ypr)[1]);
+      else if (pb.live_ok) sampler.add_if_new(p, true);
       pb.pull(sampler);
       pb.flash = 8;
       std::fputc('\a', stdout);
@@ -933,11 +1067,13 @@ int capture_loop(const Config & c, io::DM_IMU * imu, ProgressBoard & pb)
     vis = to_bgr(vis);
     if (found) cv::drawChessboardCorners(vis, pattern_size(c), corners, true);
     draw_camera_hud(vis, found, bright, pb.hint, pb.goodenough);
+    tools::draw_text(vis, fmt::format("detect {:.0f} ms", detection_ms), {20, 108},
+                     {0, 255, 255}, 0.7, 2);
     if (c.preview_scale > 0 && c.preview_scale != 1.0)
       cv::resize(vis, vis, {}, c.preview_scale, c.preview_scale);
 
     pb.show(&vis);
-    const int key = cv::waitKey(20) & 0xFF;
+    const int key = wait_key(1) & 0xFF;
     if (key == 's' || key == 'S') commit_sample(true);
     if (key == 'c' || key == 'C') {
       const int n_saved = pb.hand_mode ? pb.saved : static_cast<int>(sampler.db.size());
@@ -948,27 +1084,26 @@ int capture_loop(const Config & c, io::DM_IMU * imu, ProgressBoard & pb)
       tools::logger()->warn("还没绿齐，按提示继续移动棋盘（或再采几张）");
     }
     if (key == 'q' || key == 27) {
-      if (sampler.db.size() < 4) {
-        tools::logger()->warn("有效样本不足 4 张，继续采集");
-        continue;
-      }
-      break;
+      tools::logger()->info("已退出采集，图片已保留。可用 --resume 继续、--reuse 重新计算");
+      return -2;
     }
   }
 
   pb.found = false;
   pb.live_ok = false;
   pb.pull(sampler);
-  if (sampler.db.size() < 4) {
+  const int n_saved = pb.saved;
+  const int minimum = pb.hand_mode ? 5 : 4;
+  if (n_saved < minimum) {
     pb.capture = StepState::Fail;
     pb.hint = "not enough samples";
-    tools::logger()->warn("只采到 {} 张，至少 4 张才能标内参", sampler.db.size());
+    tools::logger()->warn("只采到 {} 组，至少需要 {} 组", n_saved, minimum);
   } else {
     pb.capture = StepState::Done;
     pb.hint = "capture done, computing...";
   }
   pb.show();
-  return static_cast<int>(sampler.db.size());
+  return n_saved;
 }
 
 std::vector<double> mat_to_vec(const cv::Mat & m)
@@ -1000,6 +1135,7 @@ struct Intrinsics
 {
   cv::Mat K, D;
   double error = -1;
+  double rms = -1;
   int n_used = 0;
   cv::Size img_size;
 };
@@ -1015,6 +1151,13 @@ bool load_intrinsics_from_yaml(const std::string & path, Intrinsics & out)
   for (int i = 0; i < 9; ++i) out.K.at<double>(i / 3, i % 3) = k[i];
   out.D = cv::Mat(1, static_cast<int>(d.size()), CV_64FC1);
   for (size_t i = 0; i < d.size(); ++i) out.D.at<double>(0, static_cast<int>(i)) = d[i];
+  if (!cv::checkRange(out.K) || !cv::checkRange(out.D) ||
+      out.K.at<double>(0, 0) <= 0 || out.K.at<double>(1, 1) <= 0) return false;
+  if (yaml["image_width"] && yaml["image_height"])
+    out.img_size = {yaml["image_width"].as<int>(), yaml["image_height"].as<int>()};
+  out.error = yaml_get(yaml, "intrinsics_mean_error_px", -1.0);
+  out.rms = yaml_get(yaml, "intrinsics_rms_px", -1.0);
+  out.n_used = yaml_get(yaml, "intrinsics_samples", 0);
   return true;
 }
 
@@ -1025,9 +1168,8 @@ bool calib_intrinsics(const Config & c, Intrinsics & out, ProgressBoard & pb)
   pb.show();
 
   std::vector<std::string> paths;
-  for (int i = 1;; ++i) {
+  for (int i : chessboard::sample_ids(c.data_dir)) {
     auto path = fs::path(c.data_dir) / fmt::format("{}.jpg", i);
-    if (!fs::exists(path)) break;
     paths.push_back(path.string());
   }
   pb.intra_n = static_cast<int>(paths.size());
@@ -1037,9 +1179,13 @@ bool calib_intrinsics(const Config & c, Intrinsics & out, ProgressBoard & pb)
   std::vector<std::vector<cv::Point2f>> img_pts;
   const auto obj = object_points(c);
 
+  bool skip_preview = headless;
+  std::vector<int> used_paths;
   for (int i = 0; i < static_cast<int>(paths.size()); ++i) {
     cv::Mat img = cv::imread(paths[i]);
     if (img.empty()) continue;
+    if (out.img_size.area() > 0 && out.img_size != img.size())
+      throw std::runtime_error("标定图片分辨率不一致: " + paths[i]);
     out.img_size = img.size();
     pb.intra_i = i + 1;
     pb.brightness = image_brightness(img);
@@ -1050,39 +1196,28 @@ bool calib_intrinsics(const Config & c, Intrinsics & out, ProgressBoard & pb)
     pb.live_ok = ok && ros_params(corners, img.size(), c.cols, c.rows, pb.live);
     pb.hint = fmt::format("intrinsics {}/{}  {}", i + 1, paths.size(), ok ? "OK" : "FAIL");
 
-    cv::Mat vis = to_bgr(img);
-    cv::drawChessboardCorners(vis, pattern_size(c), corners, ok);
-    draw_camera_hud(vis, ok, pb.brightness, pb.hint, false);
-    tools::draw_text(
-      vis, fmt::format("{}/{}", i + 1, paths.size()), {20, 108}, {0, 255, 255}, 0.7, 2);
-    if (c.preview_scale > 0 && c.preview_scale != 1.0)
-      cv::resize(vis, vis, {}, c.preview_scale, c.preview_scale);
-    pb.show(&vis);
+    if (!skip_preview) {
+      cv::Mat vis = to_bgr(img);
+      cv::drawChessboardCorners(vis, pattern_size(c), corners, ok);
+      draw_camera_hud(vis, ok, pb.brightness, pb.hint, false);
+      tools::draw_text(
+        vis, fmt::format("{}/{}", i + 1, paths.size()), {20, 108}, {0, 255, 255}, 0.7, 2);
+      if (c.preview_scale > 0 && c.preview_scale != 1.0)
+        cv::resize(vis, vis, {}, c.preview_scale, c.preview_scale);
+      pb.show(&vis);
+    }
 
     fmt::print("[{}] {}\n", ok ? "success" : "failure", paths[i]);
-    const int k = cv::waitKey(c.show_each ? 0 : 1) & 0xFF;
+    const int k = skip_preview ? -1 : wait_key(c.show_each ? 0 : 1) & 0xFF;
     if (k == 'c' || k == 'C' || k == 'q' || k == 27) {
       tools::logger()->info("跳过剩余预览，继续计算内参");
-      if (ok) {
-        img_pts.push_back(corners);
-        obj_pts.push_back(obj);
-        ++pb.intra_ok;
-      }
-      for (int j = i + 1; j < static_cast<int>(paths.size()); ++j) {
-        cv::Mat more = cv::imread(paths[j]);
-        if (more.empty()) continue;
-        std::vector<cv::Point2f> more_corners;
-        if (!detect_chessboard(more, c, more_corners)) continue;
-        img_pts.push_back(more_corners);
-        obj_pts.push_back(obj);
-        ++pb.intra_ok;
-      }
-      break;
+      skip_preview = true;
     }
 
     if (!ok) continue;
     img_pts.push_back(corners);
     obj_pts.push_back(obj);
+    used_paths.push_back(i);
     ++pb.intra_ok;
   }
 
@@ -1097,13 +1232,17 @@ bool calib_intrinsics(const Config & c, Intrinsics & out, ProgressBoard & pb)
 
   pb.hint = "solving camera matrix...";
   pb.show();
+  wait_key(1);
   out.K = cv::Mat::eye(3, 3, CV_64F);
   out.D = cv::Mat::zeros(1, 5, CV_64F);
   std::vector<cv::Mat> rvecs, tvecs;
   int flags = c.fix_k3 ? cv::CALIB_FIX_K3 : 0;
   auto criteria =
     cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 100, DBL_EPSILON);
-  cv::calibrateCamera(obj_pts, img_pts, out.img_size, out.K, out.D, rvecs, tvecs, flags, criteria);
+  out.rms = cv::calibrateCamera(
+    obj_pts, img_pts, out.img_size, out.K, out.D, rvecs, tvecs, flags, criteria);
+  if (!cv::checkRange(out.K) || !cv::checkRange(out.D) || !std::isfinite(out.rms))
+    throw std::runtime_error("内参求解结果无效，请重新采集更多不同角度的清晰图片");
   out.error = mean_reproj_error(obj_pts, img_pts, out.K, out.D, rvecs, tvecs);
   out.n_used = static_cast<int>(obj_pts.size());
   pb.intra = StepState::Done;
@@ -1111,6 +1250,15 @@ bool calib_intrinsics(const Config & c, Intrinsics & out, ProgressBoard & pb)
   pb.hint = fmt::format("intrinsics done, reproj err {:.4f} px", out.error);
   pb.show();
   tools::logger()->info("内参完成：用了 {} 张，平均重投影误差 {:.4f} px", out.n_used, out.error);
+  tools::logger()->info("内参整体 RMS 重投影误差 {:.4f} px", out.rms);
+  for (size_t i = 0; i < img_pts.size(); ++i) {
+    std::vector<cv::Point2f> projected;
+    cv::projectPoints(obj_pts[i], rvecs[i], tvecs[i], out.K, out.D, projected);
+    const double rms = cv::norm(img_pts[i], projected, cv::NORM_L2) / std::sqrt(projected.size());
+    if (rms > 1.0)
+      tools::logger()->warn("图片 {} RMS {:.3f}px 偏大，请检查模糊、反光或棋盘平整度，可移出后 --reuse 重算",
+                            paths[used_paths[i]], rms);
+  }
   return true;
 }
 
@@ -1119,6 +1267,8 @@ struct Handeye
   cv::Mat R, t;  // t 单位：米
   Eigen::Vector3d ypr_deg = Eigen::Vector3d::Zero();
   int n_used = 0;
+  double rotation_rms_deg = -1;
+  double translation_rms_mm = -1;
 };
 
 bool calib_handeye(const Config & c, const Intrinsics & intra, Handeye & out, ProgressBoard & pb)
@@ -1126,6 +1276,7 @@ bool calib_handeye(const Config & c, const Intrinsics & intra, Handeye & out, Pr
   pb.hand = StepState::Run;
   pb.hint = "running hand-eye...";
   pb.show();
+  wait_key(1);
   if (intra.K.empty()) {
     pb.hand = StepState::Fail;
     tools::logger()->error("手眼标定需要内参，请先开 steps.intrinsics 或在 yaml 里写 camera_matrix");
@@ -1136,11 +1287,13 @@ bool calib_handeye(const Config & c, const Intrinsics & intra, Handeye & out, Pr
   std::vector<int> sample_ids;
   const auto obj = object_points(c);
 
-  for (int i = 1;; ++i) {
+  for (int i : chessboard::sample_ids(c.data_dir)) {
     auto img_path = fs::path(c.data_dir) / fmt::format("{}.jpg", i);
     auto q_path = fs::path(c.data_dir) / fmt::format("{}.txt", i);
     cv::Mat img = cv::imread(img_path.string());
-    if (img.empty()) break;
+    if (img.empty()) continue;
+    if (intra.img_size.area() > 0 && img.size() != intra.img_size)
+      throw std::runtime_error("手眼图片分辨率与内参不同: " + img_path.string());
     if (!fs::exists(q_path)) {
       tools::logger()->warn("缺少四元数 {}，跳过", q_path.string());
       continue;
@@ -1155,7 +1308,11 @@ bool calib_handeye(const Config & c, const Intrinsics & intra, Handeye & out, Pr
     cv::eigen2cv(R, R_cv);
 
     cv::Mat rvec, tvec;
-    cv::solvePnP(obj, corners, intra.K, intra.D, rvec, tvec, false, cv::SOLVEPNP_IPPE);
+    if (!cv::solvePnP(obj, corners, intra.K, intra.D, rvec, tvec, false, cv::SOLVEPNP_IPPE) ||
+        !cv::checkRange(rvec) || !cv::checkRange(tvec) || tvec.at<double>(2) <= 0) {
+      tools::logger()->warn("样本 {} PnP 无效，跳过", i);
+      continue;
+    }
     rvec.convertTo(rvec, CV_64F);
     tvec.convertTo(tvec, CV_64F);
     R_cv.convertTo(R_cv, CV_64F);
@@ -1215,6 +1372,35 @@ bool calib_handeye(const Config & c, const Intrinsics & intra, Handeye & out, Pr
 
   cv::calibrateHandEye(
     R_g2w, t_g2w, rvecs, tvecs, out.R, out.t, parse_handeye_method(c.handeye_method));
+  if (!cv::checkRange(out.R) || !cv::checkRange(out.t) ||
+      std::abs(cv::determinant(out.R) - 1) > 1e-3 ||
+      cv::norm(out.R.t() * out.R - cv::Mat::eye(3, 3, CV_64F)) > 1e-3)
+    throw std::runtime_error("手眼求解结果无效，请增加不同旋转轴的有效姿态后重新计算");
+  cv::Mat sum_R = cv::Mat::zeros(3, 3, CV_64F), sum_t = cv::Mat::zeros(3, 1, CV_64F);
+  std::vector<cv::Mat> world_R, world_t;
+  for (size_t i = 0; i < R_g2w.size(); ++i) {
+    cv::Mat board_R;
+    cv::Rodrigues(rvecs[i], board_R);
+    world_R.push_back(R_g2w[i] * out.R * board_R);
+    world_t.push_back(R_g2w[i] * (out.R * tvecs[i] + out.t));
+    sum_R += world_R.back();
+    sum_t += world_t.back();
+  }
+  cv::SVD svd(sum_R);
+  cv::Mat sign = cv::Mat::eye(3, 3, CV_64F);
+  sign.at<double>(2, 2) = cv::determinant(svd.u * svd.vt);
+  cv::Mat mean_R = svd.u * sign * svd.vt, mean_t = sum_t / world_t.size();
+  double rot_sq = 0, pos_sq = 0;
+  for (size_t i = 0; i < world_R.size(); ++i) {
+    const double angle = rot_angle(mean_R.t() * world_R[i]);
+    rot_sq += angle * angle;
+    const double distance = cv::norm(world_t[i] - mean_t);
+    pos_sq += distance * distance;
+  }
+  out.rotation_rms_deg = std::sqrt(rot_sq / world_R.size());
+  out.translation_rms_mm = std::sqrt(pos_sq / world_t.size());
+  tools::logger()->info("固定棋盘的世界位姿一致性：旋转 RMS {:.3f} deg，位置 RMS {:.2f} mm（非绝对精度）",
+                         out.rotation_rms_deg, out.translation_rms_mm);
   out.t /= 1e3;  // mm -> m
   out.n_used = static_cast<int>(R_g2w.size());
 
@@ -1283,7 +1469,8 @@ void export_to_robot_yaml(
 void save_result(
   const Config & c, const Intrinsics * intra, const Handeye * hand, bool imu_used)
 {
-  fs::create_directories(fs::path(c.output_yaml).parent_path());
+  const fs::path output(c.output_yaml);
+  if (!output.parent_path().empty()) fs::create_directories(output.parent_path());
 
   YAML::Emitter e;
   e << YAML::BeginMap;
@@ -1291,11 +1478,26 @@ void save_result(
     "棋盘格 {}x{} 内角点, 格距 {} mm, IMU={}", c.cols, c.rows, c.square_mm,
     imu_used ? "on" : "off"));
   e << YAML::Key << "R_gimbal2imubody" << YAML::Value << YAML::Flow << c.R_gimbal2imubody;
+  e << YAML::Key << "data_dir" << YAML::Value << c.data_dir;
+  e << YAML::Key << "calibrated_at" << YAML::Value << chessboard::timestamp();
   e << YAML::Newline;
 
   if (intra && !intra->K.empty()) {
     e << YAML::Newline;
-    e << YAML::Comment(fmt::format("重投影误差: {:.4f}px  ({} 张)", intra->error, intra->n_used));
+    if (intra->error >= 0)
+      e << YAML::Comment(fmt::format("平均重投影误差: {:.4f}px  ({} 张)", intra->error, intra->n_used));
+    else
+      e << YAML::Comment("内参从文件加载，原文件未记录误差统计");
+    if (intra->img_size.area() > 0) {
+      e << YAML::Key << "image_width" << YAML::Value << intra->img_size.width;
+      e << YAML::Key << "image_height" << YAML::Value << intra->img_size.height;
+    }
+    if (intra->error >= 0)
+      e << YAML::Key << "intrinsics_mean_error_px" << YAML::Value << intra->error;
+    if (intra->rms >= 0)
+      e << YAML::Key << "intrinsics_rms_px" << YAML::Value << intra->rms;
+    if (intra->n_used > 0)
+      e << YAML::Key << "intrinsics_samples" << YAML::Value << intra->n_used;
     e << YAML::Key << "camera_matrix" << YAML::Value << YAML::Flow << mat_to_vec(intra->K);
     e << YAML::Key << "distort_coeffs" << YAML::Value << YAML::Flow << mat_to_vec(intra->D);
   }
@@ -1307,6 +1509,9 @@ void save_result(
       hand->ypr_deg[1], hand->ypr_deg[2]));
     e << YAML::Key << "R_camera2gimbal" << YAML::Value << YAML::Flow << mat_to_vec(hand->R);
     e << YAML::Key << "t_camera2gimbal" << YAML::Value << YAML::Flow << mat_to_vec(hand->t);
+    e << YAML::Key << "handeye_samples" << YAML::Value << hand->n_used;
+    e << YAML::Key << "handeye_rotation_rms_deg" << YAML::Value << hand->rotation_rms_deg;
+    e << YAML::Key << "handeye_translation_rms_mm" << YAML::Value << hand->translation_rms_mm;
   } else {
     e << YAML::Newline;
     e << YAML::Comment("未做手眼：无 IMU 或 steps.handeye=false。把 use_imu 设为 true 后重采即可。");
@@ -1314,13 +1519,30 @@ void save_result(
   e << YAML::Newline;
   e << YAML::EndMap;
 
-  std::ofstream f(c.output_yaml);
+  const fs::path temp = output.string() + ".tmp";
+  std::ofstream f(temp);
   f << e.c_str() << "\n";
+  f.close();
+  if (!f) throw std::runtime_error("结果写入失败，原结果已保留: " + c.output_yaml);
+  if (fs::exists(output)) {
+    const auto history = output.parent_path() / "history";
+    fs::create_directories(history);
+    const auto name = output.stem().string() + "_" + chessboard::timestamp();
+    int suffix = 0;
+    fs::path backup;
+    do {
+      backup = history / (name + (suffix ? "_" + std::to_string(suffix) : "") + ".yaml");
+      ++suffix;
+    } while (fs::exists(backup));
+    fs::copy_file(output, backup);
+    tools::logger()->info("上一版结果已备份: {}", backup.string());
+  }
+  fs::rename(temp, output);
   fmt::print("\n{}\n", e.c_str());
   tools::logger()->info("结果已写入 {}", c.output_yaml);
 }
 
-int main(int argc, char * argv[])
+int main(int argc, char * argv[]) try
 {
   cv::CommandLineParser cli(argc, argv, keys);
   if (cli.has("help")) {
@@ -1342,14 +1564,14 @@ int main(int argc, char * argv[])
   }
 
   const std::string mode = cli.has("mode") ? cli.get<std::string>("mode") : "";
-  std::string intrinsics_yaml = "calib_chessboard/output/intrinsics.yaml";
+  const std::string intrinsics_yaml = cli.get<std::string>("intrinsics");
   if (mode == "intra") {
     cfg.do_capture = true;
     cfg.do_intrinsics = true;
     cfg.do_handeye = false;
     cfg.use_imu = false;
     cfg.data_dir = "calib_chessboard/data_intrinsics";
-    cfg.output_yaml = intrinsics_yaml;
+    cfg.output_yaml = "calib_chessboard/output/intrinsics.yaml";
     cfg.export_to.clear();
   } else if (mode == "hand") {
     cfg.do_capture = true;
@@ -1363,7 +1585,39 @@ int main(int argc, char * argv[])
     tools::logger()->error("未知模式 {}，只能是 intra 或 hand", mode);
     return 1;
   }
+  const auto session = cli.get<std::string>("session");
+  if (session != "new" && session != "resume" && session != "reuse")
+    throw std::runtime_error("session 只能是 new、resume 或 reuse");
+  if (cli.has("data-dir")) cfg.data_dir = cli.get<std::string>("data-dir");
+  if (cli.has("output")) cfg.output_yaml = cli.get<std::string>("output");
+  if (cfg.data_dir.empty() || cfg.output_yaml.empty())
+    throw std::runtime_error("数据目录和结果路径不能为空");
+  if (session == "reuse") cfg.do_capture = false;
+  headless = cli.has("headless");
+  if (headless && cfg.do_capture)
+    throw std::runtime_error("--headless 仅用于离线计算，请同时使用 --session=reuse");
+  if (!cli.check()) {
+    cli.printErrors();
+    return 1;
+  }
   bool want_handeye = cfg.do_handeye && cfg.use_imu;
+  if (!cfg.do_intrinsics && !want_handeye)
+    throw std::runtime_error("没有启用可执行的标定步骤，请选择 intra 或 hand 模式");
+  if (!cfg.do_capture || session == "resume") validate_capture_info(cfg);
+
+  // Validate hand-eye prerequisites before opening hardware or archiving files.
+  Intrinsics intra;
+  bool have_intra = false;
+  if (!cfg.do_intrinsics && want_handeye) {
+    auto try_load = [&](const std::string & path) {
+      if (!fs::exists(path) || !load_intrinsics_from_yaml(path, intra)) return false;
+      tools::logger()->info("手眼使用内参文件: {}", path);
+      return true;
+    };
+    have_intra = try_load(intrinsics_yaml) || (!cli.has("intrinsics") && try_load(cfg.path));
+    if (!have_intra)
+      throw std::runtime_error("手眼缺少有效内参，请先运行 run.sh intra，或使用 --intrinsics=文件路径");
+  }
 
   ProgressBoard pb;
   pb.need = cfg.min_frames;
@@ -1373,7 +1627,7 @@ int main(int argc, char * argv[])
   pb.hand = want_handeye ? StepState::Wait : StepState::Skip;
   pb.save = StepState::Wait;
   pb.hint = "准备开始";
-  cv::namedWindow(kCalibWin, cv::WINDOW_NORMAL);
+  if (!headless) cv::namedWindow(kCalibWin, cv::WINDOW_NORMAL);
   pb.show();
 
   fmt::print(
@@ -1384,12 +1638,13 @@ int main(int argc, char * argv[])
     "步骤: {}{}{}\n"
     "数据目录: {}\n"
     "结果: {}\n"
+    "本次采集: {}\n"
     "===========================\n\n",
     config_path, cfg.cols, cfg.rows, cfg.square_mm, cfg.detector,
     cfg.use_imu ? "USB DM-IMU（只用于手眼）" : "关闭（只标内参）",
     cfg.do_capture ? "采集 " : "", cfg.do_intrinsics ? "内参 " : "",
     want_handeye ? "手眼" : (cfg.do_handeye ? "手眼(跳过,无IMU)" : ""), cfg.data_dir,
-    cfg.output_yaml);
+    cfg.output_yaml, cfg.do_capture ? session : "reuse (不打开相机/IMU)");
 
   if (cfg.do_handeye && !cfg.use_imu)
     tools::logger()->warn("use_imu=false，跳过手眼。手眼请用 ./calib_chessboard/run.sh hand");
@@ -1400,45 +1655,30 @@ int main(int argc, char * argv[])
       imu = std::make_unique<io::DM_IMU>(cfg.imu_port);
       tools::logger()->info("USB IMU 已连接 {}", cfg.imu_port);
     } catch (const std::exception & e) {
-      tools::logger()->error("打开 USB IMU 失败: {}  —— 改为只标内参", e.what());
-      cfg.use_imu = false;
-      want_handeye = false;
-      pb.imu = false;
-      pb.hand = StepState::Skip;
-      imu.reset();
+      tools::logger()->error("打开 USB IMU 失败: {}，已退出，旧数据和结果未改动", e.what());
+      return 1;
     }
   }
 
   if (cfg.do_capture) {
-    const int n = capture_loop(cfg, imu.get(), pb);
+    const int n = capture_loop(cfg, imu.get(), pb, session);
+    if (n == -2) return 0;
     if (n < 0) {
       pb.capture = StepState::Fail;
       pb.hint = "failed to open camera";
       pb.show();
-      cv::waitKey(1500);
+      wait_key(1500);
       return 1;
     }
+    if (n < (want_handeye ? 5 : 4)) return 1;
   }
 
-  Intrinsics intra;
-  bool have_intra = false;
   if (cfg.do_intrinsics) {
     have_intra = calib_intrinsics(cfg, intra, pb);
     if (!have_intra) {
-      cv::waitKey(800);
+      wait_key(800);
       return 1;
     }
-  } else if (want_handeye) {
-    auto try_load = [&](const std::string & path) {
-      return fs::exists(path) && load_intrinsics_from_yaml(path, intra);
-    };
-    have_intra = try_load(intrinsics_yaml) || try_load("configs/demo.yaml") || try_load(cfg.path);
-    if (!have_intra) {
-      tools::logger()->error(
-        "手眼需要内参。先跑 ./calib_chessboard/run.sh intra，或在 configs/demo.yaml 里写 camera_matrix");
-      return 1;
-    }
-    pb.intra = StepState::Skip;
   }
 
   Handeye hand;
@@ -1446,7 +1686,7 @@ int main(int argc, char * argv[])
   if (want_handeye) {
     have_hand = calib_handeye(cfg, intra, hand, pb);
     if (!have_hand) {
-      cv::waitKey(800);
+      wait_key(800);
       return 1;
     }
   } else {
@@ -1465,8 +1705,14 @@ int main(int argc, char * argv[])
   pb.save = StepState::Done;
   pb.hint = fmt::format("ALL DONE  {}", cfg.output_yaml);
   pb.show();
-  tools::logger()->info("标定结束。结果在 {} 。窗口 3 秒后自动关，或按任意键。", cfg.output_yaml);
-  cv::waitKey(3000);
-  cv::destroyAllWindows();
+  tools::logger()->info("标定结束，结果在 {}", cfg.output_yaml);
+  if (!headless) tools::logger()->info("窗口 3 秒后自动关，或按任意键。");
+  wait_key(3000);
+  if (!headless) cv::destroyAllWindows();
   return 0;
+}
+catch (const std::exception & e)
+{
+  tools::logger()->error("标定失败: {}。已保存图片和上一版结果会保留。", e.what());
+  return 1;
 }
